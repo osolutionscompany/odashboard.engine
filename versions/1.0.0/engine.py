@@ -13,6 +13,95 @@ from dateutil.relativedelta import relativedelta
 _logger = logging.getLogger(__name__)
 
 
+def get_models(env):
+    """
+    Return a list of models relevant for analytics, automatically filtering out technical models
+
+    Args:
+        env: Odoo environment from the request
+        
+    Returns:
+        List of analytically relevant models with name and model attributes
+    """
+    try:
+        # Create domain to filter models directly in the search
+        # 1. Must be non-transient
+        domain = [('transient', '=', False)]
+
+        # 2. Exclude technical models using NOT LIKE conditions
+        technical_prefixes = ['ir.', 'base.', 'bus.', 'base_import.',
+                            'web.', 'mail.', 'auth.', 'report.',
+                            'resource.', 'wizard.']
+        for prefix in technical_prefixes:
+            domain.append(('model', 'not like', f'{prefix}%'))
+
+        # Models starting with underscore
+        domain.append(('model', 'not like', '\_%'))
+
+        # Execute the optimized search
+        model_obj = env['ir.model'].sudo()
+        models = model_obj.search(domain)
+
+        _logger.info("Found %s analytical models", len(models))
+
+        # Format the response with the already filtered models
+        model_list = [{
+            'name': model.name,
+            'model': model.model,
+        } for model in models]
+
+        return {'success': True, 'data': model_list}
+
+    except Exception as e:
+        _logger.error("Error in get_models: %s", str(e))
+        return {'success': False, 'error': str(e)}
+
+
+def get_model_fields(model_name, env):
+    """
+    Retrieve information about the fields of a specific Odoo model.
+
+    Args:
+        model_name: Name of the Odoo model (example: 'sale.order')
+        env: Odoo environment from the request
+        
+    Returns:
+        Dictionary with information about the model's fields
+    """
+    try:
+        # Check if the model exists
+        if model_name not in env:
+            return {'success': False, 'error': f"Model '{model_name}' not found"}
+
+        # Get field information
+        model_obj = env[model_name].sudo()
+        
+        # Get fields info
+        fields_info = {}
+        for name, field in model_obj._fields.items():
+            # Skip binary fields and function fields without a store
+            if field.type == 'binary' or (field.compute and not field.store):
+                continue
+                
+            # Get field properties
+            field_info = {
+                'type': field.type,
+                'string': field.string,
+                'relation': field.comodel_name if hasattr(field, 'comodel_name') else None,
+                'store': field.store if hasattr(field, 'store') else True,
+                'required': field.required,
+                'readonly': field.readonly,
+            }
+            
+            fields_info[name] = field_info
+
+        return {'success': True, 'data': fields_info}
+
+    except Exception as e:
+        _logger.error("Error in get_model_fields: %s", str(e))
+        return {'success': False, 'error': str(e)}
+
+
 def process_dashboard_request(request_data, env):
     """
     Process dashboard visualization requests.

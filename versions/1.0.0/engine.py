@@ -1261,8 +1261,9 @@ def _transform_graph_data(results, group_by_list, measures, base_domain, order_s
                     # Use string for secondary key
                     sec_key = str(formatted_sec_value) if formatted_sec_value is not None else 'None'
 
-                    # Calculate the combined key for this measure
-                    measure_key = f"{field}:{agg}:{sec_key}"
+                    # Calculate the combined key for this measure - use field|sec_key format
+                    # This maintains the format utilisé dans l'API original
+                    measure_key = f"{field}|{sec_key}"
 
                     # Add the measure value to the primary group
                     field_agg_key = f"{field}:{agg}"
@@ -1272,7 +1273,9 @@ def _transform_graph_data(results, group_by_list, measures, base_domain, order_s
             for measure in measures:
                 field = measure.get('field')
                 agg = measure.get('aggregation', 'sum')
-                measure_key = f"{field}:{agg}"
+                
+                # Use just the field name as key, without the aggregation
+                measure_key = field
                 
                 # Add the measure value directly to primary group
                 field_agg_key = f"{field}:{agg}"

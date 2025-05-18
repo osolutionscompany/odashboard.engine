@@ -5,7 +5,7 @@ This file contains all the processing logic for dashboard visualizations.
 import json
 import logging
 import itertools
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time
 import calendar
 import re
 from dateutil.relativedelta import relativedelta
@@ -134,6 +134,321 @@ def get_model_fields(model_name, env):
     except Exception as e:
         _logger.error("Error in get_model_fields: %s", str(e))
         return {'success': False, 'error': str(e)}
+
+
+def _build_odash_domain(group_by_values):
+    """
+    Build odash.domain for a specific data point based on groupby values.
+    Returns only the specific domain for this data point, not including the base domain.
+    
+    Args:
+        group_by_values: Dictionary of field names and their values from the data point
+        
+    Returns:
+        List of domain criteria (e.g. [[field, operator, value], ...]])
+    """
+    domain = []
+    
+    for field, value in group_by_values.items():
+        # Handle standard date fields that might need interval processing
+        if field in ['date', 'create_date', 'write_date'] or field.endswith('_date'):
+            # Format "DD MMM YYYY" (ex: "11 Apr 2025")
+            if isinstance(value, str) and re.match(r'\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}', value):
+                try:
+                    # Parse the date string
+                    parts = value.split(' ')
+                    if len(parts) == 3:
+                        day = int(parts[0])
+                        month_str = parts[1]
+                        year = int(parts[2])
+                        
+                        # Map month name to number
+                        month_map = {
+                            'Jan': 1, 'January': 1, 'Feb': 2, 'February': 2,
+                            'Mar': 3, 'March': 3, 'Apr': 4, 'April': 4,
+                            'May': 5, 'Jun': 6, 'June': 6, 'Jul': 7, 'July': 7,
+                            'Aug': 8, 'August': 8, 'Sep': 9, 'Sept': 9, 'September': 9,
+                            'Oct': 10, 'October': 10, 'Nov': 11, 'November': 11,
+                            'Dec': 12, 'December': 12
+                        }
+                        
+                        if month_str in month_map:
+                            month = month_map[month_str]
+                            
+                            # Create start and end of day for the date
+                            start_datetime = datetime(year, month, day, 0, 0, 0)
+                            end_datetime = datetime(year, month, day, 23, 59, 59)
+                            
+                            # Add the date range to the domain
+                            domain.append([field, '>=', start_datetime.isoformat()])
+                            domain.append([field, '<=', end_datetime.isoformat()])
+                            continue
+                except Exception as e:
+                    _logger.error("Error parsing date in domain: %s - %s", value, str(e))
+                    # Fall through to default handling
+        
+        # Handle week pattern specifically
+        if isinstance(value, str) and re.match(r'W\d{1,2}\s+\d{4}', value):
+            # Handle week format by getting date range
+            start_date, end_date = _parse_date_from_string(value, return_range=True)
+            domain.append([field, '>=', start_date.isoformat()])
+            domain.append([field, '<=', end_date.isoformat()])
+        elif field.endswith(':month') or field.endswith(':week') or field.endswith(':day') or field.endswith(':year'):
+            # Handle date intervals
+            base_field = field.split(':')[0]
+            interval = field.split(':')[1]
+            
+            if interval == 'month' and re.match(r'\d{4}-\d{2}', str(value)):
+                year, month = str(value).split('-')
+                start_date = date(int(year), int(month), 1)
+                end_date = date(int(year), int(month), calendar.monthrange(int(year), int(month))[1])
+                domain.append([base_field, '>=', start_date.isoformat()])
+                domain.append([base_field, '<=', end_date.isoformat()])
+            elif interval == 'day' and isinstance(value, str):
+                # Try to parse day format and create a range
+                try:
+                    # Get date object using our extract_date function logic
+                    date_formats = ['%d %b %Y', '%Y-%m-%d']
+                    date_obj = None
+                    
+                    for fmt in date_formats:
+                        try:
+                            date_obj = datetime.strptime(value, fmt).date()
+                            break
+                        except ValueError:
+                            continue
+                            
+                    if date_obj:
+                        start_dt = datetime.combine(date_obj, time.min)
+                        end_dt = datetime.combine(date_obj, time.max)
+                        domain.append([base_field, '>=', start_dt.isoformat()])
+                        domain.append([base_field, '<=', end_dt.isoformat()])
+                        continue
+                except Exception as e:
+                    _logger.error("Error parsing day interval: %s - %s", value, str(e))
+                
+                # Default fallback if parsing fails
+                domain.append([field, '=', value])
+            else:
+                # Direct comparison for other formats
+                domain.append([field, '=', value])
+        else:
+            # Regular field
+            domain.append([field, '=', value])
+    
+    # Return empty list if domain is identical to base_domain
+    return domain if domain else []
+
+def _parse_date_from_string(date_str, return_range=False):
+    """
+    Parse date from string in various formats, with special handling for week format.
+    
+    Args:
+        date_str: String representation of date (e.g., 'W16 2025', '2025-04')
+        return_range: If True, returns start and end date objects for the period
+        
+    Returns:
+        Date object or tuple of (start_date, end_date) if return_range is True
+    """
+    # Handle week format (e.g., 'W16 2025')
+    week_match = re.match(r'W(\d{1,2})\s+(\d{4})', date_str)
+    if week_match:
+        week_num = int(week_match.group(1))
+        year = int(week_match.group(2))
+        
+        # Get the first day of the specified week
+        first_day = datetime.strptime(f'{year}-{week_num}-1', '%Y-%W-%w')
+        # Adjust to the beginning of the week
+        start_date = first_day - timedelta(days=first_day.weekday())
+        end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
+        
+        if return_range:
+            return start_date.date(), end_date.date()
+        return start_date.date()
+    
+    # Try various date formats
+    formats = ['%Y-%m-%d', '%Y-%m', '%b %Y', '%Y%m%d']
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            if return_range:
+                if fmt == '%Y-%m':
+                    last_day = calendar.monthrange(dt.year, dt.month)[1]
+                    return dt.date(), date(dt.year, dt.month, last_day)
+                else:
+                    return dt.date(), dt.date()
+            return dt.date()
+        except ValueError:
+            continue
+    
+    # Return as is if parsing fails
+    return date_str
+
+def _transform_graph_data(results, group_by_list, measures, base_domain, order_string=None):
+    """
+    Transform read_group results into the expected format for graph visualization.
+    
+    Args:
+        results: Results from read_group query
+        group_by_list: List of grouping fields with their configuration
+        measures: List of measure fields with aggregation type
+        base_domain: Original domain filter
+        order_string: Optional order string (e.g. 'create_date asc')
+        
+    Returns:
+        Transformed data for graph visualization
+    """
+    # Determine the primary grouping field (first in the list)
+    primary_field = group_by_list[0].get('field') if group_by_list else None
+    if not primary_field:
+        return []
+    
+    # Get the interval if any
+    primary_interval = group_by_list[0].get('interval')
+    primary_field_with_interval = f"{primary_field}:{primary_interval}" if primary_interval else primary_field
+    
+    # Process secondary groupings (if any)
+    secondary_fields = []
+    for i, gb in enumerate(group_by_list[1:], 1):
+        field = gb.get('field')
+        interval = gb.get('interval')
+        if field:
+            field_with_interval = f"{field}:{interval}" if interval else field
+            secondary_fields.append((field, field_with_interval))
+    
+    # Group by primary field first
+    primary_groups = {}
+    for result in results:
+        # Extract the primary field value
+        primary_value = None
+        
+        # Try format with interval first (standard for read_group)
+        if primary_field_with_interval in result:
+            primary_value = result[primary_field_with_interval]
+        # Then try without interval
+        elif primary_field in result:
+            primary_value = result[primary_field]
+        
+        # Try with .get for default values if still None
+        if primary_value is None:
+            primary_value = result.get(primary_field_with_interval, result.get(primary_field))
+        
+        # Skip literal None values (but not date strings)
+        if primary_value is None and not isinstance(primary_value, str):
+            continue
+        
+        # Format primary value for cleaner display
+        formatted_primary_value = primary_value
+        
+        # Create a hashable key for dictionary lookups
+        dict_key = primary_value
+        
+        # For many2one fields as tuples (id, name)
+        if isinstance(primary_value, tuple) and len(primary_value) == 2:
+            formatted_primary_value = primary_value[1]
+            dict_key = primary_value  # tuples are already hashable
+        
+        # For many2one fields from _get_field_values as dict {'id': id, 'display_name': name}
+        elif isinstance(primary_value, dict) and 'display_name' in primary_value:
+            formatted_primary_value = primary_value['display_name']
+            # Convert dict to a hashable tuple
+            dict_key = (primary_value.get('id'), primary_value.get('display_name'))
+        
+        # Handle date fields
+        elif isinstance(primary_value, str):
+            # Check if it's a date string format
+            if primary_field_with_interval.endswith(':day') or \
+               primary_field_with_interval.endswith(':week') or \
+               primary_field_with_interval.endswith(':month') or \
+               primary_field_with_interval.endswith(':quarter') or \
+               primary_field_with_interval.endswith(':year'):
+                formatted_primary_value = primary_value
+                dict_key = primary_value
+        
+        # Create or get the group for this primary value
+        if dict_key not in primary_groups:
+            # Construct domain based on data type
+            if primary_field_with_interval.endswith(':day') or \
+               primary_field_with_interval.endswith(':week') or \
+               primary_field_with_interval.endswith(':month') or \
+               primary_field_with_interval.endswith(':quarter') or \
+               primary_field_with_interval.endswith(':year'):
+                base_field = primary_field_with_interval.split(':')[0]
+                domain_field = base_field
+            else:
+                domain_field = primary_field
+            
+            primary_groups[dict_key] = {
+                'key': str(formatted_primary_value),
+                'odash.domain': _build_odash_domain({domain_field: primary_value})
+            }
+        
+        # Process secondary fields and measures if they exist
+        if secondary_fields:
+            for sec_field, sec_field_with_interval in secondary_fields:
+                sec_value = result.get(sec_field_with_interval)
+                
+                # Add measure values with secondary field in the key
+                for measure in measures:
+                    field = measure.get('field')
+                    agg = measure.get('aggregation', 'sum')
+                    
+                    # Format the secondary field value
+                    formatted_sec_value = sec_value
+                    
+                    # For many2one fields as tuples
+                    if sec_value and isinstance(sec_value, tuple) and len(sec_value) == 2:
+                        formatted_sec_value = sec_value[1]
+                    
+                    # For many2one fields as dict
+                    elif sec_value and isinstance(sec_value, dict) and 'display_name' in sec_value:
+                        formatted_sec_value = sec_value['display_name']
+                    
+                    # Construct the key for this measure and secondary field value
+                    measure_key = f"{field}|{formatted_sec_value}" if sec_field else field
+                    
+                    # Get the measure value
+                    if agg == 'count':
+                        measure_value = result.get('__count', 0)
+                    else:
+                        measure_value = result.get(field, 0)
+                    
+                    # Add to the primary group
+                    primary_groups[dict_key][measure_key] = measure_value
+        # If no secondary fields, add measures directly to primary groups
+        else:
+            for measure in measures:
+                field = measure.get('field')
+                agg = measure.get('aggregation', 'sum')
+                
+                # Get the measure value
+                if agg == 'count':
+                    measure_value = result.get('__count', 0)
+                else:
+                    measure_value = result.get(field, 0)
+                
+                # Add to the primary group
+                primary_groups[dict_key][field] = measure_value
+    
+    # Convert dictionary to list
+    transformed_data = list(primary_groups.values())
+    
+    # Sort data if order string specified
+    if order_string:
+        # Extract field and direction
+        parts = order_string.strip().split()
+        sort_field = parts[0].strip() if len(parts) >= 1 else None
+        sort_direction = parts[1].lower() if len(parts) >= 2 and parts[1].lower() in ['asc', 'desc'] else 'asc'
+        
+        if sort_field:
+            # Sort by key for primary field
+            if sort_field == primary_field:
+                transformed_data.sort(key=lambda x: x.get('key', ''), reverse=(sort_direction == 'desc'))
+            # Sort by measure value otherwise
+            else:
+                transformed_data.sort(key=lambda x: x.get(sort_field, 0), reverse=(sort_direction == 'desc'))
+    
+    return transformed_data
 
 
 def process_dashboard_request(request_data, env):

@@ -261,49 +261,64 @@ def _build_odash_domain(group_by_values):
 
 
 def _parse_date_from_string(date_str, return_range=False):
+    """Parse a date string in various formats and return a datetime object.
+    If return_range is True, return a tuple of start and end dates for period formats.
     """
-    Parse date from string in various formats, with special handling for week format.
+    if not date_str:
+        return None
     
-    Args:
-        date_str: String representation of date (e.g., 'W16 2025', '2025-04')
-        return_range: If True, returns start and end date objects for the period
-        
-    Returns:
-        Date object or tuple of (start_date, end_date) if return_range is True
-    """
-    # Handle week format (e.g., 'W16 2025')
-    week_match = re.match(r'W(\d{1,2})\s+(\d{4})', date_str)
+    # Week pattern (e.g., W16 2025)
+    week_pattern = re.compile(r'W(\d{1,2})\s+(\d{4})')
+    week_match = week_pattern.match(date_str)
     if week_match:
         week_num = int(week_match.group(1))
         year = int(week_match.group(2))
-        
-        # Get the first day of the specified week
-        first_day = datetime.strptime(f'{year}-{week_num}-1', '%Y-%W-%w')
-        # Adjust to the beginning of the week
-        start_date = first_day - timedelta(days=first_day.weekday())
-        end_date = start_date + timedelta(days=6, hours=23, minutes=59, seconds=59)
+        # Get the first day of the week
+        first_day = datetime.strptime(f'{year}-{week_num}-1', '%Y-%W-%w').date()
+        if return_range:
+            last_day = first_day + timedelta(days=6)
+            return first_day, last_day
+        return first_day
+    
+    # Month pattern (e.g., January 2025 or 2025-01)
+    month_pattern = re.compile(r'(\w+)\s+(\d{4})|(\d{4})-(\d{2})')
+    month_match = month_pattern.match(date_str)
+    if month_match:
+        if month_match.group(1) and month_match.group(2):
+            # Format: January 2025
+            month_name = month_match.group(1)
+            year = int(month_match.group(2))
+            month_num = datetime.strptime(month_name, '%B').month
+        else:
+            # Format: 2025-01
+            year = int(month_match.group(3))
+            month_num = int(month_match.group(4))
         
         if return_range:
-            return start_date.date(), end_date.date()
-        return start_date.date()
+            first_day = date(year, month_num, 1)
+            last_day = date(year, month_num, calendar.monthrange(year, month_num)[1])
+            return first_day, last_day
+        return date(year, month_num, 1)
     
-    # Try various date formats
-    formats = ['%Y-%m-%d', '%Y-%m', '%b %Y', '%Y%m%d']
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(date_str, fmt)
-            if return_range:
-                if fmt == '%Y-%m':
-                    last_day = calendar.monthrange(dt.year, dt.month)[1]
-                    return dt.date(), date(dt.year, dt.month, last_day)
-                else:
-                    return dt.date(), dt.date()
-            return dt.date()
-        except ValueError:
-            continue
+    # Standard date format
+    try:
+        parsed_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        if return_range:
+            return parsed_date, parsed_date
+        return parsed_date
+    except ValueError:
+        pass
     
-    # Return as is if parsing fails
-    return date_str
+    # ISO format
+    try:
+        parsed_date = datetime.fromisoformat(date_str).date()
+        if return_range:
+            return parsed_date, parsed_date
+        return parsed_date
+    except ValueError:
+        pass
+    
+    return None
 
 
 def _transform_graph_data(results, group_by_list, measures, base_domain, order_string=None):
@@ -567,103 +582,105 @@ def _get_field_values(model, field_name, domain=None):
         rel_values = relation_model.search_read([], ['id', 'display_name'])
         return [{'id': r['id'], 'display_name': r['display_name']} for r in rel_values]
     
-    # For other field types, retrieve actual values
-    query = f"""
-        SELECT DISTINCT {field_name} 
-        FROM {model._table} 
-        WHERE {field_name} IS NOT NULL
-        LIMIT 1000
-    """
-    model.env.cr.execute(query)
-    results = model.env.cr.fetchall()
-    return [r[0] for r in results if r[0]]
+    elif field_info.type in ['date', 'datetime']:
+        # Cette partie est gérée séparément avec _build_date_range
+        # basé sur l'intervalle et le domaine
+        return []
+    
+    else:
+        # Pour les autres types de champs, récupérer toutes les valeurs existantes
+        records = model.search(domain)
+        # Filtrer les valeurs None pour éviter les problèmes
+        values = [v for v in list(set(records.mapped(field_name))) if v is not None]
+        return values
 
 
 def _build_date_range(model, field_name, domain, interval='month'):
     """Build a range of dates for show_empty functionality."""
-    # Get min and max dates directly from database for better performance
-    query = f"""
-        SELECT MIN({field_name}), MAX({field_name})
-        FROM {model._table}
-        WHERE {field_name} IS NOT NULL
-    """
-    model.env.cr.execute(query)
-    result = model.env.cr.fetchone()
-    
-    if not result or not result[0] or not result[1]:
-        return []
-    
-    min_date = result[0]
-    max_date = result[1]
-    
-    # Ensure dates are datetime objects
-    if isinstance(min_date, str):
-        min_date = datetime.strptime(min_date, '%Y-%m-%d')
-    if isinstance(max_date, str):
-        max_date = datetime.strptime(max_date, '%Y-%m-%d')
+    # Approche plus simple et robuste - ignorer les requêtes SQL complexes
+    # et travailler directement avec les données du modèle
+    try:
+        # Définir une plage par défaut (derniers 3 mois)
+        today = date.today()
+        default_min_date = today - relativedelta(months=3)
+        default_max_date = today
         
-    # Add a buffer to ensure we include the full range
+        # Récupérer tous les enregistrements correspondant au domaine
+        # et extraire les min/max dates directement des données Python
+        records = model.search(domain or [])
+        if records:
+            date_values = []
+            # Extraire les valeurs de date de tous les enregistrements
+            for record in records:
+                field_value = record[field_name]
+                if field_value:
+                    # Convertir en date si c'est un datetime
+                    if isinstance(field_value, datetime):
+                        field_value = field_value.date()
+                    date_values.append(field_value)
+            
+            if date_values:
+                min_date = min(date_values)
+                max_date = max(date_values)
+            else:
+                min_date = default_min_date
+                max_date = default_max_date
+        else:
+            # Pas de données - utiliser les dates par défaut
+            min_date = default_min_date
+            max_date = default_max_date
+        
+        # Limiter à 1 an maximum pour éviter les plages trop grandes
+        if (max_date - min_date).days > 365:
+            max_date = min_date + timedelta(days=365)
+            _logger.warning("Date range for %s limited to 1 year", field_name)
+    except Exception as e:
+        _logger.error("Error in _build_date_range for field %s: %s", field_name, e)
+        # En cas d'erreur, générer une plage par défaut (3 derniers mois)
+        min_date = date.today() - relativedelta(months=3)
+        max_date = date.today()
+    
+    # Generate all intermediate dates based on interval
+    date_values = []
+    current_date = min_date
+    
     if interval == 'day':
-        current = min_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        result = []
-        while current <= max_date:
-            result.append(current.strftime('%Y-%m-%d'))
-            current += timedelta(days=1)
-        return result
-    
+        delta = timedelta(days=1)
+        format_str = '%Y-%m-%d'
     elif interval == 'week':
-        # Start with the beginning of the week containing min_date
-        current = min_date - timedelta(days=min_date.weekday())
-        result = []
-        while current <= max_date:
-            week_num = current.strftime('%W')
-            year = current.strftime('%Y')
-            result.append(f"W{int(week_num)} {year}")
-            current += timedelta(days=7)
-        return result
-    
+        delta = timedelta(weeks=1)
+        # Use ISO week format
+        format_str = 'W%W %Y'
     elif interval == 'month':
-        current = min_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        result = []
-        while current <= max_date:
-            # Use full month name (e.g., "April 2025" instead of "Apr 2025")
-            month_name = current.strftime('%B')
-            year = current.strftime('%Y')
-            result.append(f"{month_name} {year}")
-            
-            # Move to next month
-            if current.month == 12:
-                current = current.replace(year=current.year + 1, month=1)
-            else:
-                current = current.replace(month=current.month + 1)
-        return result
-    
+        # For months, use a relative delta
+        delta = relativedelta(months=1)
+        format_str = '%Y-%m'
     elif interval == 'quarter':
-        # Start with the beginning of the quarter containing min_date
-        quarter = (min_date.month - 1) // 3 + 1
-        current = min_date.replace(month=(quarter-1)*3+1, day=1)
-        result = []
-        while current <= max_date:
-            quarter = (current.month - 1) // 3 + 1
-            year = current.strftime('%Y')
-            result.append(f"Q{quarter} {year}")
-            
-            # Move to next quarter
-            if quarter == 4:
-                current = current.replace(year=current.year + 1, month=1)
-            else:
-                current = current.replace(month=quarter*3+1)
-        return result
-    
+        delta = relativedelta(months=3)
+        # Custom handling for quarters
+        format_str = 'Q%q %Y'
     elif interval == 'year':
-        current_year = min_date.year
-        result = []
-        while current_year <= max_date.year:
-            result.append(str(current_year))
-            current_year += 1
-        return result
+        delta = relativedelta(years=1)
+        format_str = '%Y'
+    else:
+        # Default to month
+        delta = relativedelta(months=1)
+        format_str = '%Y-%m'
     
-    return []
+    while current_date <= max_date:
+        # Format based on interval
+        if interval == 'week':
+            date_values.append(f"W{current_date.isocalendar()[1]} {current_date.year}")
+        elif interval == 'quarter':
+            quarter = (current_date.month - 1) // 3 + 1
+            date_values.append(f"Q{quarter} {current_date.year}")
+        else:
+            date_values.append(current_date.strftime(format_str))
+        
+        # Move to next date
+        current_date += delta
+    
+    return date_values
 
 
 def _generate_empty_combinations(model, group_by_list, domain, results):

@@ -68,72 +68,65 @@ def get_model_fields(model_name, env):
     Returns:
         Dictionary with information about the model's fields
     """
-    try:
-        # Check if the model exists
-        if model_name not in env:
-            return {'success': False, 'error': f"Model '{model_name}' not found"}
+    """
+            Get information about all fields of an Odoo model.
 
-        # Get field information
-        model_obj = env[model_name].sudo()
-        
-        # Get fields from the model
-        fields_data = model_obj.fields_get()
-        
-        # Fields to exclude
-        excluded_field_types = ['binary', 'one2many', 'many2many', 'text']  # Binary fields like images in base64
-        excluded_field_names = [
-            '__last_update',
-            'write_date', 'write_uid', 'create_uid',
-        ]
+            :param model: Odoo model object
+            :return: List of field information
+            """
+    fields_info = []
 
-        # Fields prefixed with these strings will be excluded
-        excluded_prefixes = ['message_', 'activity_', 'has_', 'is_', 'x_studio_']
-        
-        # Get fields info
-        fields_info = []
-        
-        for field_name, field_data in fields_data.items():
-            field_type = field_data.get('type', 'unknown')
+    # Get fields from the model
+    fields_data = model_name.fields_get()
 
-            # Skip fields that match our exclusion criteria
-            if (field_type in excluded_field_types or
+    # Fields to exclude
+    excluded_field_types = ['binary', 'one2many', 'many2many', 'text']  # Binary fields like images in base64
+    excluded_field_names = [
+        '__last_update',
+        'write_date', 'write_uid', 'create_uid',
+    ]
+
+    # Fields prefixed with these strings will be excluded
+    excluded_prefixes = ['message_', 'activity_', 'has_', 'is_', 'x_studio_']
+
+    for field_name, field_data in fields_data.items():
+        field_type = field_data.get('type', 'unknown')
+
+        # Skip fields that match our exclusion criteria
+        if (field_type in excluded_field_types or
                 field_name in excluded_field_names or
                 any(field_name.startswith(prefix) for prefix in excluded_prefixes)):
-                continue
+            continue
 
-            # Check if it's a computed field that's not stored
-            field_obj = model_obj._fields.get(field_name)
-            if field_obj and field_obj.compute and not field_obj.store:
-                _logger.debug("Skipping non-stored computed field: %s", field_name)
-                continue
+        # Check if it's a computed field that's not stored
+        field_obj = model_name._fields.get(field_name)
+        if field_obj and field_obj.compute and not field_obj.store:
+            _logger.debug("Skipping non-stored computed field: %s", field_name)
+            continue
 
-            # Create field info object for response
-            field_info = {
-                'field': field_name,
-                'name': field_data.get('string', field_name),
-                'type': field_type,
-                'label': field_data.get('string', field_name),
-                'value': field_name,
-                'search': f"{field_name} {field_data.get('string', field_name)}"
-            }
+        # Create field info object for response
+        field_info = {
+            'field': field_name,
+            'name': field_data.get('string', field_name),
+            'type': field_type,
+            'label': field_data.get('string', field_name),
+            'value': field_name,
+            'search': f"{field_name} {field_data.get('string', field_name)}"
+        }
 
-            # Add selection options if field is a selection
-            if field_data.get('type') == 'selection' and 'selection' in field_data:
-                field_info['selection'] = [
-                    {'value': value, 'label': label}
-                    for value, label in field_data['selection']
-                ]
+        # Add selection options if field is a selection
+        if field_data.get('type') == 'selection' and 'selection' in field_data:
+            field_info['selection'] = [
+                {'value': value, 'label': label}
+                for value, label in field_data['selection']
+            ]
 
-            fields_info.append(field_info)
+        fields_info.append(field_info)
 
-        # Sort fields by name for better readability
-        fields_info.sort(key=lambda x: x['name'])
+    # Sort fields by name for better readability
+    fields_info.sort(key=lambda x: x['name'])
 
-        return {'success': True, 'data': fields_info}
-
-    except Exception as e:
-        _logger.error("Error in get_model_fields: %s", str(e))
-        return {'success': False, 'error': str(e)}
+    return fields_info
 
 
 def _build_odash_domain(group_by_values):

@@ -1266,7 +1266,7 @@ def _transform_graph_data(results, group_by_list, measures, base_domain, order_s
 
             primary_groups[dict_key] = {
                 'key': str(formatted_primary_value),
-                'odash.domain': self._build_odash_domain({domain_field: primary_value})
+                'odash.domain': _build_odash_domain({domain_field: primary_value})
             }
 
         # Process secondary fields and measures if they exist

@@ -1105,6 +1105,9 @@ def _process_table(model, domain, group_by_list, order_string, config):
 
             # Add domain for each record - uniquement l'ID, sans le domaine d'entrée
             for record in records:
+                for key in record.keys():
+                    if isinstance(record[key], tuple):
+                        record[key] = record[key][1]
                 record['odash.domain'] = [('id', '=', record['id'])]
 
             return {

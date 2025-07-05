@@ -29,19 +29,17 @@ def get_models(env):
 
         # 2. Exclude technical models using NOT LIKE conditions
         technical_prefixes = ['ir.', 'base.', 'bus.', 'base_import.',
-                              'web.', 'mail.', 'auth.', 'report.',
-                              'resource.', 'wizard.']
+                              'web.', 'auth.', 'report.', 'wizard.']
+
         for prefix in technical_prefixes:
             domain.append(('model', 'not like', f'{prefix}%'))
 
         # Models starting with underscore
-        domain.append(('model', 'not like', '\_%'))
+        domain.append(('model', 'not like', '\\_%'))
 
         # Execute the optimized search
         model_obj = env['ir.model'].sudo()
         models = model_obj.search(domain)
-
-        _logger.info("Found %s analytical models", len(models))
 
         # Format the response with the already filtered models
         model_list = [{
@@ -80,6 +78,91 @@ def get_model_fields(model_name, env):
         return {'success': False, 'error': str(e)}
 
 
+def get_model_records(model_name, kw, env):
+    """
+    Retrieve all records of a specific model with pagination and search functionality.
+
+    :param model_name: Name of the Odoo model (example: 'res.partner')
+    :param page: Page number for pagination (default: 1)
+    :param search: Optional search string to filter records by name (default: '')
+    :return: JSON with the model records
+    """
+    try:
+        _logger.info("API call: Fetching records for model: %s", model_name)
+
+        # Check if the model exists
+        if model_name not in env:
+            return {'success': False, 'error': f"Model '{model_name}' not found"}
+
+        # Get pagination parameters
+        page = int(kw.get('page', 1))
+        limit = 50  # Number of records per page
+        offset = (page - 1) * limit
+
+        # Get search parameter
+        search_query = kw.get('search', '')
+
+        # Create domain for search
+        domain = []
+        if search_query:
+            domain.append(('name', 'ilike', search_query))
+
+        # Get model
+        model = env[model_name].sudo()
+
+        # Count total records matching the domain
+        total_records = model.search_count(domain)
+        total_pages = (total_records + limit - 1) // limit
+
+        # Search with pagination
+        records = model.search(domain, order="name asc", limit=limit, offset=offset)
+
+        # Format the records
+        record_list = []
+        for record in records:
+            record_data = {
+                'id': record.id,
+                'name': record.name,
+            }
+
+            # Include display_name if different from name
+            if record.display_name != record.name:
+                record_data['display_name'] = record.display_name
+
+            # Get other basic fields if they exist
+            for field in ['active', 'code', 'ref']:
+                if hasattr(record, field):
+                    record_data[field] = getattr(record, field)
+
+            record_list.append(record_data)
+
+        return {'success': True, 'data': record_list}
+
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def get_model_search(model_name, kw, request):
+    search = request.params.get('search', '')
+    page = int(kw.get('page', 1))
+    limit = 50
+
+    domain = []
+
+    if search:
+        domain.append(('name', 'ilike', search))
+
+    records = request.env[model_name].sudo().search(domain, limit=limit, offset=(page - 1) * limit)
+    record_list = []
+    for record in records:
+        record_list.append({
+            'id': record.id,
+            'name': record.name,
+        })
+
+    return {'success': True, 'data': record_list}
+
+
 def _get_fields_info(model):
     """
     Get information about all fields of an Odoo model.
@@ -92,30 +175,11 @@ def _get_fields_info(model):
     # Get fields from the model
     fields_data = model.fields_get()
 
-    # Fields to exclude
-    excluded_field_types = ['binary', 'one2many', 'many2many', 'text']  # Binary fields like images in base64
-    excluded_field_names = [
-        '__last_update',
-        'write_date', 'write_uid', 'create_uid',
-    ]
-
-    # Fields prefixed with these strings will be excluded
-    excluded_prefixes = ['message_', 'activity_', 'has_', 'is_', 'x_studio_']
-
     for field_name, field_data in fields_data.items():
         field_type = field_data.get('type', 'unknown')
 
-        # Skip fields that match our exclusion criteria
-        if (field_type in excluded_field_types or
-                field_name in excluded_field_names or
-                any(field_name.startswith(prefix) for prefix in excluded_prefixes)):
-            continue
-
         # Check if it's a computed field that's not stored
         field_obj = model._fields.get(field_name)
-        if field_obj and field_obj.compute and not field_obj.store:
-            _logger.debug("Skipping non-stored computed field: %s", field_name)
-            continue
 
         # Create field info object for response
         field_info = {
@@ -126,6 +190,8 @@ def _get_fields_info(model):
             'value': field_name,
             'search': f"{field_name} {field_data.get('string', field_name)}"
         }
+        if field_obj.comodel_name:
+            field_info['model'] = field_obj.comodel_name
 
         # Add selection options if field is a selection
         if field_data.get('type') == 'selection' and 'selection' in field_data:
@@ -143,7 +209,6 @@ def _get_fields_info(model):
 
 
 def _process_block(model, domain, config):
-    """Process block type visualization."""
     block_options = config.get('block_options', {})
     field = block_options.get('field')
     aggregation = block_options.get('aggregation', 'sum')
@@ -159,7 +224,7 @@ def _process_block(model, domain, config):
             'data': {
                 'value': count,
                 'label': label or 'Count',
-                'odash.domain': []
+                '__domain': []
             }
         }
     else:
@@ -286,7 +351,7 @@ def _process_block(model, domain, config):
                 'data': {
                     'value': value,
                     'label': label or f'{aggregation.capitalize()} of {field}',
-                    'odash.domain': []
+                    '__domain': []
                 }
             }
         except Exception as e:
@@ -355,21 +420,71 @@ def _process_table(model, domain, group_by_list, order_string, config):
         # Count total records for pagination
         total_count = model.search_count(domain)
 
-        results = model.search_read(
-            domain,
-            fields=fields_to_read,
-            limit=limit,
-            offset=offset,
-            order=order_string
-        )
+        if group_by_list:
+            table_options = config.get('table_options', {})
+            measures = table_options.get('columns', [])
 
-        for result in results:
-            for key in result.keys():
-                if isinstance(result[key], tuple):
-                    result[key] = result[key][1]
+            if not measures:
+                # Default to count measure if not specified
+                measures = [{'field': 'id', 'aggregation': 'count'}]
+
+            measure_fields = []
+            for measure in measures:
+                measure_fields.append(f"{measure.get('field')}:{measure.get('aggregation', 'sum')}")
+
+            # Prepare groupby fields for read_group
+            groupby_fields = []
+
+            for gb in group_by_list:
+                field = gb.get('field')
+                interval = gb.get('interval') if gb.get('interval') != 'auto' else 'month'
+                if field:
+                    groupby_fields.append(f"{field}:{interval}" if interval else field)
+
+            results = model.read_group(
+                domain,
+                fields=measure_fields,
+                groupby=groupby_fields,
+                orderby=order_string,
+                lazy=False
+            )
+
+            if 'show_empty' in group_by_list[0] and group_by_list[0]['show_empty']:
+                if ':' in groupby_fields[0]:
+                    results = complete_missing_date_intervals(results)
+                else:
+                    results = complete_missing_selection_values(results, model, groupby_fields[0])
+
+            transformed_data = []
+            for result in results:
+                data = {
+                    'key': result[groupby_fields[0]][1] if isinstance(result[groupby_fields[0]],
+                                                                      tuple) or isinstance(
+                        result[groupby_fields[0]], list) else result[groupby_fields[0]],
+                    '__domain': result['__domain']
+                }
+
+                for measure in measures:
+                    data[measure['field']] = result[measure['field']]
+
+                transformed_data.append(data)
+        else:
+            transformed_data = model.search_read(
+                domain,
+                fields=fields_to_read,
+                limit=limit,
+                offset=offset,
+                order=order_string
+            )
+
+            for data in transformed_data:
+                data['__domain'] = []
+                for key in data.keys():
+                    if isinstance(data[key], tuple):
+                        data[key] = data[key][1]
 
         return {
-            'data': results,
+            'data': transformed_data,
             'metadata': {
                 'page': offset // limit + 1 if limit else 1,
                 'limit': limit,
@@ -400,7 +515,7 @@ def _process_graph(model, domain, group_by_list, order_string, config):
 
     for gb in group_by_list:
         field = gb.get('field')
-        interval = gb.get('interval')
+        interval = gb.get('interval') if gb.get('interval') != 'auto' else 'month'
         if field:
             groupby_fields.append(f"{field}:{interval}" if interval else field)
 
@@ -419,7 +534,7 @@ def _process_graph(model, domain, group_by_list, order_string, config):
             lazy=True
         )
 
-        if 'show_empty' in group_by_list[0]:
+        if 'show_empty' in group_by_list[0] and group_by_list[0]['show_empty']:
             if ':' in groupby_fields[0]:
                 results = complete_missing_date_intervals(results)
             else:
@@ -431,7 +546,7 @@ def _process_graph(model, domain, group_by_list, order_string, config):
             data = {
                 'key': result[groupby_fields[0]][1] if isinstance(result[groupby_fields[0]], tuple) or isinstance(
                     result[groupby_fields[0]], list) else result[groupby_fields[0]],
-                'odash.domain': result['__domain']
+                '__domain': result['__domain']
             }
 
             if len(groupby_fields) > 1:
@@ -451,7 +566,11 @@ def _process_graph(model, domain, group_by_list, order_string, config):
 
                 for sub_result in sub_results:
                     for measure in config['graph_options']['measures']:
-                        data[f"{measure['field']}|{sub_result[groupby_fields[1]]}"] = sub_result[measure['field']]
+                        data_sub_key = sub_result[groupby_fields[1]][1] if isinstance(sub_result[groupby_fields[1]],
+                                                                                      tuple) or isinstance(
+                            sub_result[groupby_fields[1]], list) else sub_result[groupby_fields[1]]
+                        data[f"{measure['field']}|{data_sub_key}"] = {"value": sub_result[measure['field']],
+                                                                      "__domain": sub_result["__domain"]}
             else:
                 for measure in config['graph_options']['measures']:
                     data[measure['field']] = result[measure['field']]
@@ -600,8 +719,12 @@ def complete_missing_date_intervals(results):
         prev_result = complete_results[-1]
         curr_result = results[i]
 
-        prev_to = datetime.strptime(prev_result['__range'][range_field]['to'], '%Y-%m-%d %H:%M:%S')
-        curr_from = datetime.strptime(curr_result['__range'][range_field]['from'], '%Y-%m-%d %H:%M:%S')
+        try:
+            prev_to = datetime.strptime(prev_result['__range'][range_field]['to'], '%Y-%m-%d %H:%M:%S')
+            curr_from = datetime.strptime(curr_result['__range'][range_field]['from'], '%Y-%m-%d %H:%M:%S')
+        except Exception:
+            prev_to = datetime.strptime(prev_result['__range'][range_field]['to'], '%Y-%m-%d')
+            curr_from = datetime.strptime(curr_result['__range'][range_field]['from'], '%Y-%m-%d')
 
         if prev_to < curr_from:
             next_date = prev_to
@@ -609,10 +732,10 @@ def complete_missing_date_intervals(results):
             while next_date < curr_from:
                 if interval_type == 'day':
                     interval_end = next_date + timedelta(days=1)
-                    label = next_date.strftime('%Y-%m-%d')
+                    label = next_date.strftime("%d %b %Y")
                 elif interval_type == 'week':
                     interval_end = next_date + timedelta(weeks=1)
-                    label = f"W{next_date.isocalendar()[1]} {next_date.year}"
+                    label = f"W{interval_end.isocalendar()[1]} {interval_end.year}"
                 elif interval_type == 'month':
                     interval_end = next_date + relativedelta(months=1)
                     label = next_date.strftime('%B %Y')
@@ -658,6 +781,7 @@ def complete_missing_date_intervals(results):
         complete_results.append(curr_result)
 
     return complete_results
+
 
 def process_dashboard_request(request_data, env):
     """

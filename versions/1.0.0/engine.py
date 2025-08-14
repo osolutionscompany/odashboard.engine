@@ -856,7 +856,7 @@ def process_dashboard_request(request_data, env):
             else:
                 result = {'error': f'Unsupported visualization type: {viz_type}'}
 
-            if data_source.get('preview'):
+            if data_source.get('preview') and viz_type != 'block':
                 result['data'] = result['data'][:50]
 
             results[config_id] = result

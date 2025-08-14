@@ -842,15 +842,21 @@ def process_dashboard_request(request_data, env):
             # Process based on visualization type
             if sql_request and viz_type in ['graph', 'table']:
                 # Handle SQL request (with security measures)
-                results[config_id] = _process_sql_request(sql_request, viz_type, config, env)
+                result = _process_sql_request(sql_request, viz_type, config, env)
             elif viz_type == 'block':
-                results[config_id] = _process_block(model, domain, config)
+                result = _process_block(model, domain, config)
             elif viz_type == 'graph':
-                results[config_id] = _process_graph(model, domain, group_by, order_string, config)
+                result = _process_graph(model, domain, group_by, order_string, config)
             elif viz_type == 'table':
-                results[config_id] = _process_table(model, domain, group_by, order_string, config)
+                result = _process_table(model, domain, group_by, order_string, config)
             else:
-                results[config_id] = {'error': f'Unsupported visualization type: {viz_type}'}
+                result = {'error': f'Unsupported visualization type: {viz_type}'}
+
+            if data_source.get('preview'):
+                result['data'] = result['data'][:50]
+
+            results[config_id] = result
+
 
         except Exception as e:
             _logger.exception("Error processing visualization %s:", config_id)

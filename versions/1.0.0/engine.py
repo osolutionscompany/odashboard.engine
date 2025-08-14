@@ -180,6 +180,9 @@ def _get_fields_info(model):
 
         # Check if it's a computed field that's not stored
         field_obj = model._fields.get(field_name)
+        if field_obj and field_obj.compute and not field_obj.store:
+            _logger.debug("Skipping non-stored computed field: %s", field_name)
+            continue
 
         # Create field info object for response
         field_info = {

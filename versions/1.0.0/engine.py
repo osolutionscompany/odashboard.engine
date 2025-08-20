@@ -237,27 +237,27 @@ def _process_block(model, domain, config):
             # Use SQL for better performance on large datasets
             agg_func = aggregation.upper()
 
-            # Construit la clause WHERE et les paramètres de façon sécurisée
+            # Build the WHERE clause and parameters securely
             if not domain:
                 where_clause = "TRUE"
                 where_params = []
             else:
-                # Au lieu d'utiliser _where_calc directement, utilisons search pour obtenir la requête
-                # C'est une façon plus sûre et robuste de générer la clause WHERE
+                # Instead of using _where_calc directly, use search to get the query
+                # This is a safer and more robust way to generate the WHERE clause
                 records = model.search(domain)
                 if not records:
-                    where_clause = "FALSE"  # Aucun enregistrement correspondant
+                    where_clause = "FALSE"  # No matching records
                     where_params = []
                 else:
                     id_list = records.ids
                     where_clause = f"{model._table}.id IN %s"
                     where_params = [tuple(id_list) if len(id_list) > 1 else (id_list[0],)]
 
-            # Solution plus fiable et unifiée pour toutes les agrégations
+            # More reliable and unified solution for all aggregations
             try:
                 _logger.info("Processing %s aggregation for field %s", agg_func, field)
 
-                # Vérifier d'abord s'il y a des enregistrements
+                # First check if there are any records
                 count_query = f"""
                         SELECT COUNT(*) as count
                         FROM {model._table}
@@ -271,14 +271,14 @@ def _process_block(model, domain, config):
 
                 _logger.info("Found %s records matching the criteria", count)
 
-                # Si aucun enregistrement, renvoyer 0 pour toutes les agrégations
+                # If no records, return 0 for all aggregations
                 if count == 0:
                     value = 0
                     _logger.info("No records found, using default value 0")
                 else:
-                    # Calculer l'agrégation selon le type
+                    # Calculate aggregation based on type
                     if agg_func == 'AVG':
-                        # Calculer la somme pour la moyenne
+                        # Calculate sum for average
                         sum_query = f"""
                                 SELECT SUM({field}) as total
                                 FROM {model._table}
@@ -291,11 +291,11 @@ def _process_block(model, domain, config):
                         if sum_result and len(sum_result) > 0:
                             total = sum_result[0] if sum_result[0] is not None else 0
 
-                        # Calculer la moyenne
+                        # Calculate average
                         value = total / count if count > 0 else 0
                         _logger.info("Calculated AVG manually: total=%s, count=%s, avg=%s", total, count, value)
                     elif agg_func == 'MAX':
-                        # Calculer le maximum
+                        # Calculate maximum
                         max_query = f"""
                                 SELECT {field} as max_value
                                 FROM {model._table}
@@ -312,7 +312,7 @@ def _process_block(model, domain, config):
 
                         _logger.info("Calculated MAX manually: %s", value)
                     elif agg_func == 'MIN':
-                        # Calculer le minimum
+                        # Calculate minimum
                         min_query = f"""
                                 SELECT {field} as min_value
                                 FROM {model._table}
@@ -329,7 +329,7 @@ def _process_block(model, domain, config):
 
                         _logger.info("Calculated MIN manually: %s", value)
                     elif agg_func == 'SUM':
-                        # Calculer la somme
+                        # Calculate sum
                         sum_query = f"""
                                 SELECT SUM({field}) as total
                                 FROM {model._table}
@@ -344,7 +344,7 @@ def _process_block(model, domain, config):
 
                         _logger.info("Calculated SUM manually: %s", value)
                     else:
-                        # Fonction d'agrégation non reconnue
+                        # Unrecognized aggregation function
                         value = 0
                         _logger.warning("Unrecognized aggregation function: %s", agg_func)
             except Exception as e:
@@ -689,7 +689,7 @@ def complete_missing_date_intervals(results):
     if not results or len(results) < 2:
         return results
 
-    complete_results = [results[0]]  # On commence avec le premier résultat
+    complete_results = [results[0]]  # Start with the first result
 
     interval_type = None
     range_field = None

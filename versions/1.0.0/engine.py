@@ -29,7 +29,7 @@ def get_models(env):
 
         # 2. Exclude technical models using NOT LIKE conditions
         technical_prefixes = ['ir.', 'base.', 'bus.', 'base_import.',
-                              'web.', 'auth.', 'report.', 'wizard.']
+                              'web.', 'auth.', 'wizard.']
 
         for prefix in technical_prefixes:
             domain.append(('model', 'not like', f'{prefix}%'))

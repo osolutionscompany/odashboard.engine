@@ -3,10 +3,8 @@ Odashboard Engine - Version 1.0.0
 This file contains all the processing logic for dashboard visualizations.
 """
 import logging
-import itertools
-from datetime import datetime, date, timedelta, time
-import calendar
-import re
+
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
 _logger = logging.getLogger(__name__)
@@ -29,7 +27,7 @@ def get_models(env):
 
         # 2. Exclude technical models using NOT LIKE conditions
         technical_prefixes = ['ir.', 'base.', 'bus.', 'base_import.',
-                              'web.', 'auth.', 'report.', 'wizard.']
+'web.', 'auth.', 'report.', 'wizard.']
 
         for prefix in technical_prefixes:
             domain.append(('model', 'not like', f'{prefix}%'))
@@ -857,3 +855,63 @@ def process_dashboard_request(request_data, env):
             results[config_id] = {'error': str(e)}
 
     return results
+
+
+def get_action_config(action_name):
+    """
+    Define action configurations for the unified API system.
+    This allows the engine to define its own action mappings without requiring
+    updates to the customer-installed odashboard module.
+    
+    Args:
+        action_name (str): The action to get configuration for
+        
+    Returns:
+        dict: Configuration with success/error format
+    """
+    try:
+        # Define all available actions and their configurations
+        action_configs = {
+            'get_models': {
+                'method': 'get_models',
+                'args': ['env'],
+                'required_params': [],
+                'description': 'Get list of models relevant for analytics'
+            },
+            'get_model_fields': {
+                'method': 'get_model_fields',
+                'args': [{'param': 'model_name'}, 'env'],
+                'required_params': ['model_name'],
+                'description': 'Get fields information for a specific model'
+            },
+            'get_model_records': {
+                'method': 'get_model_records',
+                'args': [{'param': 'model_name'}, 'parameters', 'env'],
+                'required_params': ['model_name'],
+                'description': 'Get records of a specific model with pagination'
+            },
+            'get_model_search': {
+                'method': 'get_model_search',
+                'args': [{'param': 'model_name'}, 'parameters', 'request'],
+                'required_params': ['model_name'],
+                'description': 'Search records of a specific model'
+            },
+            'process_dashboard_request': {
+                'method': 'process_dashboard_request',
+                'args': [{'param': 'request_data', 'default': 'parameters'}, 'env'],
+                'required_params': ['request_data'],
+                'description': 'Process dashboard visualization requests'
+            }
+        }
+        
+        if action_name in action_configs:
+            return {'success': True, 'data': action_configs[action_name]}
+        else:
+            return {
+                'success': False, 
+                'error': f'Unknown action: {action_name}. Available actions: {", ".join(action_configs.keys())}'
+            }
+            
+    except Exception as e:
+        _logger.error("Error in get_action_config: %s", str(e))
+        return {'success': False, 'error': str(e)}

@@ -27,7 +27,7 @@ def get_models(env):
 
         # 2. Exclude technical models using NOT LIKE conditions
         technical_prefixes = ['ir.', 'base.', 'bus.', 'base_import.',
-'web.', 'auth.', 'report.', 'wizard.']
+                              'web.', 'auth.', 'wizard.']
 
         for prefix in technical_prefixes:
             domain.append(('model', 'not like', f'{prefix}%'))
@@ -178,6 +178,9 @@ def _get_fields_info(model):
 
         # Check if it's a computed field that's not stored
         field_obj = model._fields.get(field_name)
+        if field_obj and field_obj.compute and not field_obj.store:
+            _logger.debug("Skipping non-stored computed field: %s", field_name)
+            continue
 
         # Create field info object for response
         field_info = {
@@ -188,7 +191,8 @@ def _get_fields_info(model):
             'value': field_name,
             'search': f"{field_name} {field_data.get('string', field_name)}"
         }
-        if field_obj.comodel_name:
+
+        if field_obj and field_obj.comodel_name:
             field_info['model'] = field_obj.comodel_name
 
         # Add selection options if field is a selection
@@ -231,27 +235,27 @@ def _process_block(model, domain, config):
             # Use SQL for better performance on large datasets
             agg_func = aggregation.upper()
 
-            # Construit la clause WHERE et les paramètres de façon sécurisée
+            # Build the WHERE clause and parameters securely
             if not domain:
                 where_clause = "TRUE"
                 where_params = []
             else:
-                # Au lieu d'utiliser _where_calc directement, utilisons search pour obtenir la requête
-                # C'est une façon plus sûre et robuste de générer la clause WHERE
+                # Instead of using _where_calc directly, use search to get the query
+                # This is a safer and more robust way to generate the WHERE clause
                 records = model.search(domain)
                 if not records:
-                    where_clause = "FALSE"  # Aucun enregistrement correspondant
+                    where_clause = "FALSE"  # No matching records
                     where_params = []
                 else:
                     id_list = records.ids
                     where_clause = f"{model._table}.id IN %s"
                     where_params = [tuple(id_list) if len(id_list) > 1 else (id_list[0],)]
 
-            # Solution plus fiable et unifiée pour toutes les agrégations
+            # More reliable and unified solution for all aggregations
             try:
                 _logger.info("Processing %s aggregation for field %s", agg_func, field)
 
-                # Vérifier d'abord s'il y a des enregistrements
+                # First check if there are any records
                 count_query = f"""
                         SELECT COUNT(*) as count
                         FROM {model._table}
@@ -265,14 +269,14 @@ def _process_block(model, domain, config):
 
                 _logger.info("Found %s records matching the criteria", count)
 
-                # Si aucun enregistrement, renvoyer 0 pour toutes les agrégations
+                # If no records, return 0 for all aggregations
                 if count == 0:
                     value = 0
                     _logger.info("No records found, using default value 0")
                 else:
-                    # Calculer l'agrégation selon le type
+                    # Calculate aggregation based on type
                     if agg_func == 'AVG':
-                        # Calculer la somme pour la moyenne
+                        # Calculate sum for average
                         sum_query = f"""
                                 SELECT SUM({field}) as total
                                 FROM {model._table}
@@ -285,11 +289,11 @@ def _process_block(model, domain, config):
                         if sum_result and len(sum_result) > 0:
                             total = sum_result[0] if sum_result[0] is not None else 0
 
-                        # Calculer la moyenne
+                        # Calculate average
                         value = total / count if count > 0 else 0
                         _logger.info("Calculated AVG manually: total=%s, count=%s, avg=%s", total, count, value)
                     elif agg_func == 'MAX':
-                        # Calculer le maximum
+                        # Calculate maximum
                         max_query = f"""
                                 SELECT {field} as max_value
                                 FROM {model._table}
@@ -306,7 +310,7 @@ def _process_block(model, domain, config):
 
                         _logger.info("Calculated MAX manually: %s", value)
                     elif agg_func == 'MIN':
-                        # Calculer le minimum
+                        # Calculate minimum
                         min_query = f"""
                                 SELECT {field} as min_value
                                 FROM {model._table}
@@ -323,7 +327,7 @@ def _process_block(model, domain, config):
 
                         _logger.info("Calculated MIN manually: %s", value)
                     elif agg_func == 'SUM':
-                        # Calculer la somme
+                        # Calculate sum
                         sum_query = f"""
                                 SELECT SUM({field}) as total
                                 FROM {model._table}
@@ -338,7 +342,7 @@ def _process_block(model, domain, config):
 
                         _logger.info("Calculated SUM manually: %s", value)
                     else:
-                        # Fonction d'agrégation non reconnue
+                        # Unrecognized aggregation function
                         value = 0
                         _logger.warning("Unrecognized aggregation function: %s", agg_func)
             except Exception as e:
@@ -683,7 +687,7 @@ def complete_missing_date_intervals(results):
     if not results or len(results) < 2:
         return results
 
-    complete_results = [results[0]]  # On commence avec le premier résultat
+    complete_results = [results[0]]  # Start with the first result
 
     interval_type = None
     range_field = None
@@ -840,15 +844,21 @@ def process_dashboard_request(request_data, env):
             # Process based on visualization type
             if sql_request and viz_type in ['graph', 'table']:
                 # Handle SQL request (with security measures)
-                results[config_id] = _process_sql_request(sql_request, viz_type, config, env)
+                result = _process_sql_request(sql_request, viz_type, config, env)
             elif viz_type == 'block':
-                results[config_id] = _process_block(model, domain, config)
+                result = _process_block(model, domain, config)
             elif viz_type == 'graph':
-                results[config_id] = _process_graph(model, domain, group_by, order_string, config)
+                result = _process_graph(model, domain, group_by, order_string, config)
             elif viz_type == 'table':
-                results[config_id] = _process_table(model, domain, group_by, order_string, config)
+                result = _process_table(model, domain, group_by, order_string, config)
             else:
-                results[config_id] = {'error': f'Unsupported visualization type: {viz_type}'}
+                result = {'error': f'Unsupported visualization type: {viz_type}'}
+
+            if data_source.get('preview') and viz_type != 'block':
+                result['data'] = result['data'][:50]
+
+            results[config_id] = result
+
 
         except Exception as e:
             _logger.exception("Error processing visualization %s:", config_id)
@@ -862,10 +872,10 @@ def get_action_config(action_name):
     Define action configurations for the unified API system.
     This allows the engine to define its own action mappings without requiring
     updates to the customer-installed odashboard module.
-    
+
     Args:
         action_name (str): The action to get configuration for
-        
+
     Returns:
         dict: Configuration with success/error format
     """
@@ -903,15 +913,15 @@ def get_action_config(action_name):
                 'description': 'Process dashboard visualization requests'
             }
         }
-        
+
         if action_name in action_configs:
             return {'success': True, 'data': action_configs[action_name]}
         else:
             return {
-                'success': False, 
+                'success': False,
                 'error': f'Unknown action: {action_name}. Available actions: {", ".join(action_configs.keys())}'
             }
-            
+
     except Exception as e:
         _logger.error("Error in get_action_config: %s", str(e))
         return {'success': False, 'error': str(e)}

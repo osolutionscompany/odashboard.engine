@@ -632,11 +632,21 @@ def _process_table(model, domain, group_by_list, order_string, config, env=None)
                 lazy=False
             )
 
-            if 'show_empty' in group_by_list[0] and group_by_list[0]['show_empty']:
+            # Check if we should show empty values for the first group by
+            show_empty = group_by_list[0].get('show_empty', False) if group_by_list else False
+
+            if show_empty:
                 if ':' in groupby_fields[0]:
                     results = complete_missing_date_intervals(results)
                 else:
                     results = complete_missing_selection_values(results, model, groupby_fields[0])
+            else:
+                # Filter out empty values when show_empty is False
+                results = [result for result in results if any(
+                    isinstance(v, (int, float)) and v > 0 
+                    for k, v in result.items() 
+                    if k not in ['__domain', '__range'] and not k.startswith('__')
+                )]
 
             transformed_data = []
             for result in results:
@@ -731,11 +741,21 @@ def _process_graph(model, domain, group_by_list, order_string, config, env=None)
             lazy=True
         )
 
-        if 'show_empty' in group_by_list[0] and group_by_list[0]['show_empty']:
+        # Check if we should show empty values for the first group by
+        show_empty = group_by_list[0].get('show_empty', False) if group_by_list else False
+
+        if show_empty:
             if ':' in groupby_fields[0]:
                 results = complete_missing_date_intervals(results)
             else:
                 results = complete_missing_selection_values(results, model, groupby_fields[0])
+        else:
+            # Filter out empty values when show_empty is False
+            results = [result for result in results if any(
+                isinstance(v, (int, float)) and v > 0 
+                for k, v in result.items() 
+                if k not in ['__domain', '__range'] and not k.startswith('__')
+            )]
 
         # Transform results into the expected format
         transformed_data = []
@@ -755,7 +775,10 @@ def _process_graph(model, domain, group_by_list, order_string, config, env=None)
                     lazy=True
                 )
 
-                if 'show_empty' in group_by_list[1]:
+                # Check if we should show empty values for the second group by
+                show_empty_2 = group_by_list[1].get('show_empty', False) if len(group_by_list) > 1 else False
+
+                if show_empty_2:
                     if ':' in groupby_fields[1]:
                         sub_results = complete_missing_date_intervals(sub_results)
                     else:

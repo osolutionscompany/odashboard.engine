@@ -11,22 +11,85 @@ import pytz
 _logger = logging.getLogger(__name__)
 
 
+def _has_company_field(model):
+    """
+    Check if a model has company_id or company_ids field
+    
+    Args:
+        model: Odoo model object
+        
+    Returns:
+        str or False: 'company_id', 'company_ids', or False if no company field
+    """
+    if 'company_id' in model._fields:
+        return 'company_id'
+    elif 'company_ids' in model._fields:
+        return 'company_ids'
+    return False
+
+
+def _apply_company_filtering(domain, model, env):
+    """
+    Apply company filtering to a domain if the model has company_id or company_ids field
+
+    Args:
+        domain: Existing domain filter
+        model: Odoo model object
+        env: Odoo environment
+
+    Returns:
+        list: Domain with company filtering applied
+    """
+    company_field = _has_company_field(model)
+    if not company_field:
+        _logger.debug("Model %s has no company field, skipping company filtering", model._name)
+        return domain
+
+    try:
+        dashboard = env.context.get('dashboard_id')
+        if not dashboard or not dashboard.allowed_company_ids:
+            _logger.debug("No company filtering applied - no dashboard or allowed companies")
+            return domain
+
+        company_ids = dashboard.allowed_company_ids.ids
+        _logger.info("Applying company filter for companies: %s on field: %s", company_ids, company_field)
+
+        # Create appropriate domain based on field type
+        company_domain = []
+        if company_field == 'company_id':
+            # Many2one field: records with no company OR records with allowed company
+            company_domain = ['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]
+        elif company_field == 'company_ids':
+            # Many2many field: records with no companies OR records with any allowed company
+            company_domain = ['|', ('company_ids', '=', False), ('company_ids', 'in', company_ids)]
+
+        # Combine existing domain with company domain
+        if domain:
+            return domain + company_domain
+        else:
+            return company_domain
+
+    except Exception as e:
+        _logger.warning("Error applying company filtering: %s", e)
+        return domain
+
+
 def _format_datetime_value(value, field_type, lang=None, user_timezone=None):
     """
     Format date/datetime values with locale and Odoo user timezone support for data tables
-    
+
     Args:
         value: The datetime/date value from database
         field_type: 'date' or 'datetime'
         lang: Odoo res.lang record
         user_timezone: User timezone from env.user.tz (e.g., 'Europe/Paris', 'America/New_York')
-    
+
     Returns:
         Formatted string optimized for table display with locale and timezone support
     """
     if not value:
         return value
-        
+
     try:
         # Parse the datetime value
         if isinstance(value, str):
@@ -35,21 +98,21 @@ def _format_datetime_value(value, field_type, lang=None, user_timezone=None):
             dt = value
         else:
             return str(value)
-        
+
         # Convert to user's timezone if provided and it's a datetime field
         if field_type == 'datetime' and user_timezone:
             try:
                 # Assume database datetime is in UTC if no timezone info
                 if dt.tzinfo is None:
                     dt = pytz.UTC.localize(dt)
-                
+
                 # Convert to user's timezone
                 user_tz = pytz.timezone(user_timezone)
                 dt = dt.astimezone(user_tz)
             except Exception as e:
                 _logger.warning("Error converting timezone for %s to %s: %s", dt, user_timezone, e)
                 # Continue with original datetime if timezone conversion fails
-        
+
         # Use Odoo language record formatting if available
         if lang and hasattr(lang, 'date_format'):
             try:
@@ -66,13 +129,13 @@ def _format_datetime_value(value, field_type, lang=None, user_timezone=None):
             except Exception as e:
                 _logger.warning("Error using Odoo language format %s: %s", lang.date_format if lang else 'None', e)
                 # Fall through to default formatting
-        
+
         # Fallback to default formatting if no language record or formatting fails
         if field_type == 'datetime':
             return dt.strftime('%d/%m/%Y %H:%M')  # Default European format
         else:
             return dt.strftime('%d/%m/%Y')
-                
+
     except Exception as e:
         _logger.warning("Error formatting datetime value %s: %s", value, e)
         return str(value)
@@ -81,23 +144,23 @@ def _format_datetime_value(value, field_type, lang=None, user_timezone=None):
 def get_user_context(env):
     """
     Get current user's context information for cache invalidation
-    
+
     Args:
         env: Odoo environment from the request
-        
+
     Returns:
         Dictionary with user language, timezone, and date format settings
     """
     try:
         user = env.user
-        
+
         # Get user language record
         user_lang_code = user.lang if hasattr(user, 'lang') else 'en_US'
         lang_record = env['res.lang']._lang_get(user_lang_code) if user_lang_code else None
-        
+
         # Get user timezone
         user_timezone = user.tz if hasattr(user, 'tz') else 'UTC'
-        
+
         # Prepare user context data
         context_data = {
             'lang': user_lang_code,
@@ -105,9 +168,9 @@ def get_user_context(env):
             'date_format': lang_record.date_format if lang_record and hasattr(lang_record, 'date_format') else '%m/%d/%Y',
             'time_format': lang_record.short_time_format if lang_record and hasattr(lang_record, 'short_time_format') else '%H:%M'
         }
-        
+
         return {'success': True, 'data': context_data}
-        
+
     except Exception as e:
         _logger.error("Error in get_user_context: %s", str(e))
         return {'success': False, 'error': str(e)}
@@ -119,7 +182,7 @@ def get_models(env):
 
     Args:
         env: Odoo environment from the request
-        
+
     Returns:
         List of analytically relevant models with name and model attributes
     """
@@ -211,6 +274,9 @@ def get_model_records(model_name, kw, env):
         # Get model
         model = env[model_name].sudo()
 
+        # Apply company filtering
+        domain = _apply_company_filtering(domain, model, env)
+
         # Count total records matching the domain
         total_records = model.search_count(domain)
         total_pages = (total_records + limit - 1) // limit
@@ -253,7 +319,11 @@ def get_model_search(model_name, kw, request):
     if search:
         domain.append(('name', 'ilike', search))
 
-    records = request.env[model_name].sudo().search(domain, limit=limit, offset=(page - 1) * limit)
+    # Get model and apply company filtering
+    model = request.env[model_name].sudo()
+    domain = _apply_company_filtering(domain, model, request.env)
+
+    records = model.search(domain, limit=limit, offset=(page - 1) * limit)
     record_list = []
     for record in records:
         record_list.append({
@@ -313,7 +383,7 @@ def _get_fields_info(model):
     return fields_info
 
 
-def _process_block(model, domain, config):
+def _process_block(model, domain, config, env=None):
     block_options = config.get('block_options', {})
     field = block_options.get('field')
     aggregation = block_options.get('aggregation', 'sum')
@@ -321,6 +391,10 @@ def _process_block(model, domain, config):
 
     if not field:
         return {'error': 'Missing field in block_options'}
+
+    # Apply company filtering if env is provided
+    if env:
+        domain = _apply_company_filtering(domain, model, env)
 
     # Compute the aggregated value
     if aggregation == 'count':
@@ -507,7 +581,7 @@ def _process_sql_request(sql_request, viz_type, config, env):
     return {'error': 'Unexpected error in SQL processing'}
 
 
-def _process_table(model, domain, group_by_list, order_string, config):
+def _process_table(model, domain, group_by_list, order_string, config, env=None):
     """Process table type visualization."""
     table_options = config.get('table_options', {})
     columns = table_options.get('columns', [])
@@ -516,6 +590,10 @@ def _process_table(model, domain, group_by_list, order_string, config):
 
     if not columns:
         return {'error': 'Missing columns configuration for table'}
+
+    # Apply company filtering if env is provided
+    if env:
+        domain = _apply_company_filtering(domain, model, env)
 
     # Extract fields to read
     fields_to_read = [col.get('field') for col in columns if col.get('field')]
@@ -612,10 +690,14 @@ def _process_table(model, domain, group_by_list, order_string, config):
         return {'error': f'Error processing table: {str(e)}'}
 
 
-def _process_graph(model, domain, group_by_list, order_string, config):
+def _process_graph(model, domain, group_by_list, order_string, config, env=None):
     """Process graph type visualization."""
     graph_options = config.get('graph_options', {})
     measures = graph_options.get('measures', [])
+
+    # Apply company filtering if env is provided
+    if env:
+        domain = _apply_company_filtering(domain, model, env)
 
     if not group_by_list:
         group_by_list = [{'field': 'name'}]
@@ -959,11 +1041,11 @@ def process_dashboard_request(request_data, env):
                 # Handle SQL request (with security measures)
                 result = _process_sql_request(sql_request, viz_type, config, env)
             elif viz_type == 'block':
-                result = _process_block(model, domain, config)
+                result = _process_block(model, domain, config, env)
             elif viz_type == 'graph':
-                result = _process_graph(model, domain, group_by, order_string, config)
+                result = _process_graph(model, domain, group_by, order_string, config, env)
             elif viz_type == 'table':
-                result = _process_table(model, domain, group_by, order_string, config)
+                result = _process_table(model, domain, group_by, order_string, config, env)
             else:
                 result = {'error': f'Unsupported visualization type: {viz_type}'}
 

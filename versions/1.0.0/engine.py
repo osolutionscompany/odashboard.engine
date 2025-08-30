@@ -6,8 +6,111 @@ import logging
 
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+import pytz
 
 _logger = logging.getLogger(__name__)
+
+
+def _format_datetime_value(value, field_type, lang=None, user_timezone=None):
+    """
+    Format date/datetime values with locale and Odoo user timezone support for data tables
+    
+    Args:
+        value: The datetime/date value from database
+        field_type: 'date' or 'datetime'
+        lang: Odoo res.lang record
+        user_timezone: User timezone from env.user.tz (e.g., 'Europe/Paris', 'America/New_York')
+    
+    Returns:
+        Formatted string optimized for table display with locale and timezone support
+    """
+    if not value:
+        return value
+        
+    try:
+        # Parse the datetime value
+        if isinstance(value, str):
+            dt = datetime.fromisoformat(value.replace('T', ' ').replace('Z', ''))
+        elif hasattr(value, 'strftime'):
+            dt = value
+        else:
+            return str(value)
+        
+        # Convert to user's timezone if provided and it's a datetime field
+        if field_type == 'datetime' and user_timezone:
+            try:
+                # Assume database datetime is in UTC if no timezone info
+                if dt.tzinfo is None:
+                    dt = pytz.UTC.localize(dt)
+                
+                # Convert to user's timezone
+                user_tz = pytz.timezone(user_timezone)
+                dt = dt.astimezone(user_tz)
+            except Exception as e:
+                _logger.warning("Error converting timezone for %s to %s: %s", dt, user_timezone, e)
+                # Continue with original datetime if timezone conversion fails
+        
+        # Use Odoo language record formatting if available
+        if lang and hasattr(lang, 'date_format'):
+            try:
+                if field_type == 'datetime':
+                    # Combine date_format with short_time_format for datetime
+                    date_fmt = lang.date_format or '%m/%d/%Y'
+                    time_fmt = lang.short_time_format or '%H:%M'
+                    combined_fmt = f"{date_fmt} {time_fmt}"
+                    return dt.strftime(combined_fmt)
+                else:
+                    # Use only date_format for date fields
+                    date_fmt = lang.date_format or '%m/%d/%Y'
+                    return dt.strftime(date_fmt)
+            except Exception as e:
+                _logger.warning("Error using Odoo language format %s: %s", lang.date_format if lang else 'None', e)
+                # Fall through to default formatting
+        
+        # Fallback to default formatting if no language record or formatting fails
+        if field_type == 'datetime':
+            return dt.strftime('%d/%m/%Y %H:%M')  # Default European format
+        else:
+            return dt.strftime('%d/%m/%Y')
+                
+    except Exception as e:
+        _logger.warning("Error formatting datetime value %s: %s", value, e)
+        return str(value)
+
+
+def get_user_context(env):
+    """
+    Get current user's context information for cache invalidation
+    
+    Args:
+        env: Odoo environment from the request
+        
+    Returns:
+        Dictionary with user language, timezone, and date format settings
+    """
+    try:
+        user = env.user
+        
+        # Get user language record
+        user_lang_code = user.lang if hasattr(user, 'lang') else 'en_US'
+        lang_record = env['res.lang']._lang_get(user_lang_code) if user_lang_code else None
+        
+        # Get user timezone
+        user_timezone = user.tz if hasattr(user, 'tz') else 'UTC'
+        
+        # Prepare user context data
+        context_data = {
+            'lang': user_lang_code,
+            'tz': user_timezone,
+            'date_format': lang_record.date_format if lang_record and hasattr(lang_record, 'date_format') else '%m/%d/%Y',
+            'time_format': lang_record.short_time_format if lang_record and hasattr(lang_record, 'short_time_format') else '%H:%M'
+        }
+        
+        return {'success': True, 'data': context_data}
+        
+    except Exception as e:
+        _logger.error("Error in get_user_context: %s", str(e))
+        return {'success': False, 'error': str(e)}
 
 
 def get_models(env):
@@ -484,6 +587,16 @@ def _process_table(model, domain, group_by_list, order_string, config):
                 for key in data.keys():
                     if isinstance(data[key], tuple):
                         data[key] = data[key][1]
+                    # Format date/datetime fields for display
+                    elif key in fields_to_read:
+                        field_info = model._fields.get(key)
+                        if field_info and field_info.type in ['date', 'datetime'] and data[key]:
+                            # Get user timezone from Odoo user profile
+                            user_timezone = model.env.user.tz if hasattr(model.env.user, 'tz') else None
+                            # Detect user locale for proper date formatting
+                            user_lang = model.env.user.lang if hasattr(model.env.user, 'lang') else None
+                            lang = model.env['res.lang']._lang_get(user_lang)
+                            data[key] = _format_datetime_value(data[key], field_info.type, lang, user_timezone)
 
         return {
             'data': transformed_data,
@@ -882,6 +995,12 @@ def get_action_config(action_name):
     try:
         # Define all available actions and their configurations
         action_configs = {
+            'get_user_context': {
+                'method': 'get_user_context',
+                'args': ['env'],
+                'required_params': [],
+                'description': 'Get current user context (language, timezone, date formats) for cache invalidation'
+            },
             'get_models': {
                 'method': 'get_models',
                 'args': ['env'],

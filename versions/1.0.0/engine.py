@@ -686,13 +686,27 @@ def _process_table(model, domain, group_by_list, order_string, config, env=None)
                             lang = model.env['res.lang']._lang_get(user_lang)
                             data[key] = _format_datetime_value(data[key], field_info.type, lang, user_timezone)
 
+        # Add group by field information for proper column headers
+        metadata = {
+            'page': offset // limit + 1 if limit else 1,
+            'limit': limit,
+            'total_count': total_count
+        }
+        
+        # If there's a group by, add the field label for proper column header
+        if group_by_list:
+            group_field = group_by_list[0].get('field')
+            if group_field:
+                field_info = model._fields.get(group_field)
+                if field_info:
+                    metadata['group_by_field'] = {
+                        'name': group_field,
+                        'label': field_info.string or group_field.replace('_', ' ').title()
+                    }
+
         return {
             'data': transformed_data,
-            'metadata': {
-                'page': offset // limit + 1 if limit else 1,
-                'limit': limit,
-                'total_count': total_count
-            }
+            'metadata': metadata
         }
 
     except Exception as e:

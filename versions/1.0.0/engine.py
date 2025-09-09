@@ -722,39 +722,440 @@ def _process_table(model, domain, group_by_list, order_string, config, env=None)
         return {'error': f'Error processing table: {str(e)}'}
 
 
-def _process_graph(model, domain, group_by_list, order_string, config, env=None):
-    """Process graph type visualization."""
-    graph_options = config.get('graph_options', {})
-    measures = graph_options.get('measures', [])
-
-    # Apply company filtering if env is provided
-    if env:
-        domain = _apply_company_filtering(domain, model, env)
-
-    if not group_by_list:
-        group_by_list = [{'field': 'name'}]
-        order_string = "name asc"
-
-    if not measures:
-        # Default to count measure if not specified
-        measures = [{'field': 'id', 'aggregation': 'count'}]
-
-    # Prepare groupby fields for read_group
+def _prepare_groupby_fields(group_by_list):
+    """Prepare groupby fields for read_group operation."""
     groupby_fields = []
-
     for gb in group_by_list:
         field = gb.get('field')
         interval = gb.get('interval') if gb.get('interval') != 'auto' else 'month'
         if field:
             groupby_fields.append(f"{field}:{interval}" if interval else field)
+    return groupby_fields
 
-    # Prepare measure fields for read_group
+
+def _prepare_measures(measures, model):
+    """
+    Prepare measures for read_group, separating regular fields from relational fields.
+    
+    Supports advanced aggregations (SUM/AVG/MIN/MAX) on relational fields when 'related_field' is specified.
+    
+    Returns:
+        tuple: (measure_fields, relational_measures) where:
+            - measure_fields: List of fields ready for read_group
+            - relational_measures: List of One2many/Many2many measures for special handling
+    """
     measure_fields = []
+    relational_measures = []
+    
     for measure in measures:
-        measure_fields.append(f"{measure.get('field')}:{measure.get('aggregation', 'sum')}")
+        field_name = measure.get('field')
+        aggregation = measure.get('aggregation', 'sum')
+        related_field = measure.get('related_field')  # New parameter for advanced aggregations
+        
+        # Check if field exists and can be used in read_group
+        if field_name in model._fields:
+            field_info = model._fields[field_name]
+            field_type = field_info.type
+            
+            # Handle relational fields specially
+            if field_type in ['one2many', 'many2many']:
+                # Validate aggregation type for relational fields
+                if aggregation in ['count', 'count_distinct']:
+                    # Count aggregations don't need related_field
+                    relational_measures.append({
+                        **measure,
+                        'field_type': field_type,
+                        'field_info': field_info
+                    })
+                    _logger.info(f"{field_type.title()} field '{field_name}' will be handled with special {aggregation} logic")
+                    continue
+                    
+                elif aggregation in ['sum', 'avg', 'min', 'max']:
+                    # Advanced aggregations require related_field
+                    if not related_field:
+                        _logger.warning(f"Skipping field '{field_name}' - {aggregation} aggregation on {field_type} requires 'related_field' parameter")
+                        continue
+                    
+                    # Validate that related_field exists on the related model
+                    try:
+                        related_model = model.env[field_info.comodel_name]
+                        if related_field not in related_model._fields:
+                            _logger.warning(f"Skipping field '{field_name}' - related_field '{related_field}' not found on model '{field_info.comodel_name}'")
+                            continue
+                        
+                        # Validate that related_field is numeric for sum/avg
+                        related_field_info = related_model._fields[related_field]
+                        if aggregation in ['sum', 'avg'] and related_field_info.type not in ['integer', 'float', 'monetary']:
+                            _logger.warning(f"Skipping field '{field_name}' - {aggregation} aggregation requires numeric related_field, got '{related_field_info.type}'")
+                            continue
+                        
+                        relational_measures.append({
+                            **measure,
+                            'field_type': field_type,
+                            'field_info': field_info,
+                            'related_field': related_field,
+                            'related_field_info': related_field_info
+                        })
+                        _logger.info(f"{field_type.title()} field '{field_name}' will be handled with {aggregation}({related_field}) logic")
+                        continue
+                        
+                    except Exception as e:
+                        _logger.warning(f"Error validating related_field for '{field_name}': {e}")
+                        continue
+                else:
+                    _logger.warning(f"Skipping field '{field_name}' - unsupported aggregation '{aggregation}' for {field_type} fields")
+                    continue
+        
+        measure_fields.append(f"{field_name}:{aggregation}")
+    
+    return measure_fields, relational_measures
 
-    # Execute read_group
+
+def _build_relational_metadata(relational_measures, model):
+    """Build metadata for relational fields to optimize query generation."""
+    field_metadata = {}
+    
+    for measure in relational_measures:
+        field_name = measure.get('field')
+        field_info = measure['field_info']
+        field_type = measure['field_type']
+        aggregation = measure.get('aggregation', 'count')
+        related_field = measure.get('related_field')
+        
+        if field_type == 'one2many':
+            related_model_name = field_info.comodel_name
+            foreign_key = field_info.inverse_name
+            related_model = model.env[related_model_name]
+            
+            field_metadata[field_name] = {
+                'field_type': 'one2many',
+                'related_model': related_model,
+                'foreign_key': foreign_key,
+                'table_name': related_model._table,
+                'aggregation': aggregation,
+                'related_field': related_field,
+                'related_field_info': measure.get('related_field_info')
+            }
+            
+        elif field_type == 'many2many':
+            related_model_name = field_info.comodel_name
+            relation_table = field_info.relation
+            column1 = field_info.column1  # Foreign key to current model
+            column2 = field_info.column2  # Foreign key to related model
+            related_model = model.env[related_model_name]
+            
+            field_metadata[field_name] = {
+                'field_type': 'many2many',
+                'related_model': related_model,
+                'relation_table': relation_table,
+                'column1': column1,
+                'column2': column2,
+                'related_table_name': related_model._table,
+                'aggregation': aggregation,
+                'related_field': related_field,
+                'related_field_info': measure.get('related_field_info')
+            }
+    
+    return field_metadata
+
+
+def _build_relational_query(metadata, record_ids_tuple):
+    """
+    Build optimized SQL query for relational field aggregations.
+    
+    Supports: COUNT, COUNT_DISTINCT, SUM, AVG, MIN, MAX on relational fields.
+    For advanced aggregations, uses related_field parameter.
+    """
+    aggregation = metadata.get('aggregation', 'count')
+    related_field = metadata.get('related_field')
+    
+    if metadata['field_type'] == 'one2many':
+        table = metadata['table_name']
+        where_clause = f"{metadata['foreign_key']} IN %s"
+        
+        # Build SELECT clause based on aggregation type
+        if aggregation == 'count':
+            select_clause = "COUNT(*)"
+        elif aggregation == 'count_distinct':
+            select_clause = "COUNT(DISTINCT id)"
+        elif aggregation in ['sum', 'avg', 'min', 'max'] and related_field:
+            # Advanced aggregations on related field
+            agg_func = aggregation.upper()
+            select_clause = f"{agg_func}({related_field})"
+        else:
+            # Fallback to count
+            select_clause = "COUNT(*)"
+            
+        return f"SELECT {select_clause} FROM {table} WHERE {where_clause}"
+            
+    else:  # many2many
+        relation_table = metadata['relation_table']
+        related_table = metadata['related_table_name']
+        column1 = metadata['column1']  # FK to source model
+        column2 = metadata['column2']  # FK to target model
+        
+        if aggregation == 'count':
+            # Simple count on relation table
+            select_clause = "COUNT(*)"
+            return f"SELECT {select_clause} FROM {relation_table} WHERE {column1} IN %s"
+            
+        elif aggregation == 'count_distinct':
+            # Count distinct related records
+            select_clause = f"COUNT(DISTINCT {column2})"
+            return f"SELECT {select_clause} FROM {relation_table} WHERE {column1} IN %s"
+            
+        elif aggregation in ['sum', 'avg', 'min', 'max'] and related_field:
+            # Advanced aggregations require JOIN with related table
+            agg_func = aggregation.upper()
+            select_clause = f"{agg_func}(rt.{related_field})"
+            
+            return f"""
+                SELECT {select_clause} 
+                FROM {relation_table} rel 
+                JOIN {related_table} rt ON rel.{column2} = rt.id 
+                WHERE rel.{column1} IN %s
+            """
+        else:
+            # Fallback to count
+            select_clause = "COUNT(*)"
+            return f"SELECT {select_clause} FROM {relation_table} WHERE {column1} IN %s"
+
+
+def _execute_relational_query(query, record_ids_tuple, model, field_name, metadata=None):
+    """Execute relational query with fallback to ORM if SQL fails."""
     try:
+        model.env.cr.execute(query, (record_ids_tuple,))
+        result = model.env.cr.fetchone()[0]
+        return result if result is not None else 0
+    except Exception as e:
+        _logger.warning(f"SQL query failed for {field_name}, falling back to ORM: {e}")
+        
+        # Enhanced ORM fallback that handles advanced aggregations
+        if metadata:
+            return _execute_orm_fallback(record_ids_tuple, model, field_name, metadata)
+        else:
+            # Simple count fallback for backward compatibility
+            group_records = model.browse(list(record_ids_tuple))
+            field_data = group_records.read([field_name])
+            return sum(len(data.get(field_name, [])) for data in field_data)
+
+
+def _execute_orm_fallback(record_ids_tuple, model, field_name, metadata):
+    """
+    Execute ORM fallback for advanced relational aggregations.
+    
+    This handles cases where SQL queries fail by using Odoo's ORM
+    to compute the same aggregations.
+    """
+    aggregation = metadata.get('aggregation', 'count')
+    related_field = metadata.get('related_field')
+    
+    try:
+        group_records = model.browse(list(record_ids_tuple))
+        
+        if aggregation == 'count':
+            # Simple count of related records
+            field_data = group_records.read([field_name])
+            return sum(len(data.get(field_name, [])) for data in field_data)
+            
+        elif aggregation == 'count_distinct':
+            # Count distinct related records
+            all_related_ids = set()
+            for record in group_records:
+                related_records = getattr(record, field_name, [])
+                all_related_ids.update(related_records.ids)
+            return len(all_related_ids)
+            
+        elif aggregation in ['sum', 'avg', 'min', 'max'] and related_field:
+            # Advanced aggregations on related field values
+            all_values = []
+            
+            for record in group_records:
+                related_records = getattr(record, field_name, [])
+                for related_record in related_records:
+                    value = getattr(related_record, related_field, None)
+                    if value is not None:
+                        all_values.append(value)
+            
+            if not all_values:
+                return 0
+            
+            if aggregation == 'sum':
+                return sum(all_values)
+            elif aggregation == 'avg':
+                return sum(all_values) / len(all_values)
+            elif aggregation == 'min':
+                return min(all_values)
+            elif aggregation == 'max':
+                return max(all_values)
+        
+        # Fallback to count if aggregation not recognized
+        field_data = group_records.read([field_name])
+        return sum(len(data.get(field_name, [])) for data in field_data)
+        
+    except Exception as e:
+        _logger.error(f"ORM fallback failed for {field_name}: {e}")
+        return 0
+
+
+def _compute_relational_aggregates(results, relational_measures, model):
+    """
+    Compute aggregates for One2many and Many2many fields using optimized SQL queries.
+    
+    Args:
+        results: read_group results to enhance
+        relational_measures: List of relational measures to compute
+        model: Odoo model instance
+    
+    Returns:
+        Enhanced results with relational aggregates
+    """
+    if not relational_measures:
+        return results
+    
+    # Build metadata for all relational measures
+    field_metadata = _build_relational_metadata(relational_measures, model)
+    
+    # Process each result group
+    for result in results:
+        # Get record IDs in this group
+        group_domain = result.get('__domain', [])
+        group_record_ids = model.search(group_domain, order='id').ids
+        
+        if not group_record_ids:
+            # No records in this group, set all counts to 0
+            for measure in relational_measures:
+                result[measure.get('field')] = 0
+            continue
+        
+        record_ids_tuple = tuple(group_record_ids)
+        
+        # Group measures by table/relation for batch processing
+        measures_by_table = {}
+        for measure in relational_measures:
+            field_name = measure.get('field')
+            metadata = field_metadata[field_name]
+            
+            # Use table_name for one2many, relation_table for many2many
+            table_key = metadata.get('table_name') or metadata.get('relation_table')
+            
+            if table_key not in measures_by_table:
+                measures_by_table[table_key] = []
+            measures_by_table[table_key].append((field_name, metadata))
+        
+        # Execute optimized queries per table
+        for table_key, table_measures in measures_by_table.items():
+            for field_name, metadata in table_measures:
+                query = _build_relational_query(metadata, record_ids_tuple)
+                total_count = _execute_relational_query(query, record_ids_tuple, model, field_name, metadata)
+                result[field_name] = total_count
+    
+    return results
+
+
+def _apply_show_empty(results, group_by_list, groupby_fields, model):
+    """Apply show_empty logic to results."""
+    if not group_by_list or not groupby_fields:
+        return results
+    
+    show_empty = group_by_list[0].get('show_empty', False)
+    
+    if show_empty:
+        if ':' in groupby_fields[0]:
+            results = complete_missing_date_intervals(results)
+        else:
+            results = complete_missing_selection_values(results, model, groupby_fields[0])
+    else:
+        # Filter out empty values when show_empty is False
+        results = [result for result in results if any(
+            isinstance(v, (int, float)) and v > 0
+            for k, v in result.items()
+            if k not in ['__domain', '__range'] and not k.startswith('__')
+        )]
+    
+    return results
+
+
+def _transform_results(results, groupby_fields, config, model):
+    """Transform read_group results into the expected format."""
+    transformed_data = []
+    
+    for result in results:
+        data = {
+            'key': result[groupby_fields[0]][1] if isinstance(result[groupby_fields[0]], (tuple, list)) else result[groupby_fields[0]],
+            '__domain': result['__domain']
+        }
+        
+        if len(groupby_fields) > 1:
+            # Handle multi-level groupby recursively
+            measure_fields = [f"{measure['field']}:{measure.get('aggregation', 'sum')}" 
+                            for measure in config['graph_options']['measures']]
+            
+            sub_results = model.read_group(
+                result['__domain'],
+                fields=measure_fields,
+                groupby=groupby_fields[1],
+                orderby=groupby_fields[1],
+                lazy=True
+            )
+            
+            # Check if we should show empty values for the second group by
+            show_empty_2 = config.get('group_by_list', [{}])[1].get('show_empty', False) if len(config.get('group_by_list', [])) > 1 else False
+            
+            if show_empty_2:
+                if ':' in groupby_fields[1]:
+                    sub_results = complete_missing_date_intervals(sub_results)
+                else:
+                    sub_results = complete_missing_selection_values(sub_results, model, groupby_fields[1])
+            
+            for sub_result in sub_results:
+                for measure in config['graph_options']['measures']:
+                    data_sub_key = sub_result[groupby_fields[1]][1] if isinstance(sub_result[groupby_fields[1]], (tuple, list)) else sub_result[groupby_fields[1]]
+                    data[f"{measure['field']}|{data_sub_key}"] = {
+                        "value": sub_result[measure['field']],
+                        "__domain": sub_result["__domain"]
+                    }
+        else:
+            for measure in config['graph_options']['measures']:
+                data[measure['field']] = result[measure['field']]
+        
+        transformed_data.append(data)
+    
+    return transformed_data
+
+
+def _process_graph(model, domain, group_by_list, order_string, config, env=None):
+    """
+    Process graph type visualization with optimized relational field handling.
+    
+    This function has been refactored into modular components for better maintainability,
+    performance, and extensibility. It supports both One2many and Many2many field counting
+    with advanced SQL optimizations.
+    """
+    try:
+        # Apply company filtering if env is provided
+        if env:
+            domain = _apply_company_filtering(domain, model, env)
+        
+        # Set defaults if not provided
+        if not group_by_list:
+            group_by_list = [{'field': 'name'}]
+            order_string = "name asc"
+        
+        graph_options = config.get('graph_options', {})
+        measures = graph_options.get('measures', [])
+        if not measures:
+            measures = [{'field': 'id', 'aggregation': 'count'}]
+        
+        # Prepare groupby fields and measures
+        groupby_fields = _prepare_groupby_fields(group_by_list)
+        measure_fields, relational_measures = _prepare_measures(measures, model)
+        
+        # If no valid measure fields remain, use default count
+        if not measure_fields and not relational_measures:
+            measure_fields = ['id:count']
+        
+        # Execute standard read_group for regular fields
         results = model.read_group(
             domain,
             fields=measure_fields,
@@ -762,65 +1163,20 @@ def _process_graph(model, domain, group_by_list, order_string, config, env=None)
             orderby=order_string,
             lazy=True
         )
-
-        # Check if we should show empty values for the first group by
-        show_empty = group_by_list[0].get('show_empty', False) if group_by_list else False
-
-        if show_empty:
-            if ':' in groupby_fields[0]:
-                results = complete_missing_date_intervals(results)
-            else:
-                results = complete_missing_selection_values(results, model, groupby_fields[0])
-        else:
-            # Filter out empty values when show_empty is False
-            results = [result for result in results if any(
-                isinstance(v, (int, float)) and v > 0
-                for k, v in result.items()
-                if k not in ['__domain', '__range'] and not k.startswith('__')
-            )]
-
-        # Transform results into the expected format
-        transformed_data = []
-        for result in results:
-            data = {
-                'key': result[groupby_fields[0]][1] if isinstance(result[groupby_fields[0]], tuple) or isinstance(
-                    result[groupby_fields[0]], list) else result[groupby_fields[0]],
-                '__domain': result['__domain']
-            }
-
-            if len(groupby_fields) > 1:
-                sub_results = model.read_group(
-                    result['__domain'],
-                    fields=measure_fields,
-                    groupby=groupby_fields[1],
-                    orderby=groupby_fields[1],
-                    lazy=True
-                )
-
-                # Check if we should show empty values for the second group by
-                show_empty_2 = group_by_list[1].get('show_empty', False) if len(group_by_list) > 1 else False
-
-                if show_empty_2:
-                    if ':' in groupby_fields[1]:
-                        sub_results = complete_missing_date_intervals(sub_results)
-                    else:
-                        sub_results = complete_missing_selection_values(sub_results, model, groupby_fields[1])
-
-                for sub_result in sub_results:
-                    for measure in config['graph_options']['measures']:
-                        data_sub_key = sub_result[groupby_fields[1]][1] if isinstance(sub_result[groupby_fields[1]],
-                                                                                      tuple) or isinstance(
-                            sub_result[groupby_fields[1]], list) else sub_result[groupby_fields[1]]
-                        data[f"{measure['field']}|{data_sub_key}"] = {"value": sub_result[measure['field']],
-                                                                      "__domain": sub_result["__domain"]}
-            else:
-                for measure in config['graph_options']['measures']:
-                    data[measure['field']] = result[measure['field']]
-
-            transformed_data.append(data)
-
+        
+        # Compute relational aggregates (One2many/Many2many) with optimized SQL
+        results = _compute_relational_aggregates(results, relational_measures, model)
+        
+        # Apply show_empty logic
+        results = _apply_show_empty(results, group_by_list, groupby_fields, model)
+        
+        # Transform results into expected format
+        # Pass group_by_list in config for multi-level groupby support
+        config_with_groupby = {**config, 'group_by_list': group_by_list}
+        transformed_data = _transform_results(results, groupby_fields, config_with_groupby, model)
+        
         return {'data': transformed_data}
-
+        
     except Exception as e:
         _logger.exception("Error in _process_graph: %s", e)
         return {'error': f'Error processing graph data: {str(e)}'}

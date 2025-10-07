@@ -418,14 +418,19 @@ def _process_block(model, domain, config, env=None):
     if env:
         domain = _apply_company_filtering(domain, model, env)
 
+    # Count total records for metadata
+    total_count = model.search_count(domain)
+
     # Compute the aggregated value
     if aggregation == 'count':
-        count = model.search_count(domain)
         return {
             'data': {
-                'value': count,
+                'value': total_count,
                 'label': label or 'Count',
                 '__domain': []
+            },
+            'metadata': {
+                'total_count': total_count
             }
         }
     else:
@@ -452,8 +457,6 @@ def _process_block(model, domain, config, env=None):
 
             # More reliable and unified solution for all aggregations
             try:
-                _logger.info("Processing %s aggregation for field %s", agg_func, field)
-
                 # First check if there are any records
                 count_query = f"""
                         SELECT COUNT(*) as count
@@ -543,7 +546,6 @@ def _process_block(model, domain, config, env=None):
                     else:
                         # Unrecognized aggregation function
                         value = 0
-                        _logger.warning("Unrecognized aggregation function: %s", agg_func)
             except Exception as e:
                 _logger.exception("Error calculating %s for %s: %s", agg_func, field, e)
                 value = 0
@@ -1137,6 +1139,9 @@ def _process_graph(model, domain, group_by_list, order_string, config, env=None)
         if env:
             domain = _apply_company_filtering(domain, model, env)
         
+        # Count total records for metadata
+        total_count = model.search_count(domain)
+        
         # Set defaults if not provided
         if not group_by_list:
             group_by_list = [{'field': 'name'}]
@@ -1175,7 +1180,12 @@ def _process_graph(model, domain, group_by_list, order_string, config, env=None)
         config_with_groupby = {**config, 'group_by_list': group_by_list}
         transformed_data = _transform_results(results, groupby_fields, config_with_groupby, model)
         
-        return {'data': transformed_data}
+        return {
+            'data': transformed_data,
+            'metadata': {
+                'total_count': total_count
+            }
+        }
         
     except Exception as e:
         _logger.exception("Error in _process_graph: %s", e)

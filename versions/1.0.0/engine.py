@@ -332,7 +332,7 @@ def get_model_records(model_name, kw, env):
 
 
 def get_model_search(model_name, kw, request):
-    search = request.params.get('search', '')
+    search = kw.get('search', '')
     page = int(kw.get('page', 1))
     limit = 50
 

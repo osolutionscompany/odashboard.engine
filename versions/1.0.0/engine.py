@@ -4,7 +4,7 @@ This file contains all the processing logic for dashboard visualizations.
 """
 import logging
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import pytz
 
@@ -493,7 +493,6 @@ def _process_block(model, domain, config, env=None):
 
                         # Calculate average
                         value = total / count if count > 0 else 0
-                        _logger.info("Calculated AVG manually: total=%s, count=%s, avg=%s", total, count, value)
                     elif agg_func == 'MAX':
                         # Calculate maximum
                         max_query = f"""
@@ -509,8 +508,6 @@ def _process_block(model, domain, config, env=None):
 
                         if max_result and len(max_result) > 0:
                             value = max_result[0] if max_result[0] is not None else 0
-
-                        _logger.info("Calculated MAX manually: %s", value)
                     elif agg_func == 'MIN':
                         # Calculate minimum
                         min_query = f"""
@@ -526,8 +523,6 @@ def _process_block(model, domain, config, env=None):
 
                         if min_result and len(min_result) > 0:
                             value = min_result[0] if min_result[0] is not None else 0
-
-                        _logger.info("Calculated MIN manually: %s", value)
                     elif agg_func == 'SUM':
                         # Calculate sum
                         sum_query = f"""
@@ -541,8 +536,6 @@ def _process_block(model, domain, config, env=None):
 
                         if sum_result and len(sum_result) > 0:
                             value = sum_result[0] if sum_result[0] is not None else 0
-
-                        _logger.info("Calculated SUM manually: %s", value)
                     else:
                         # Unrecognized aggregation function
                         value = 0
@@ -562,41 +555,291 @@ def _process_block(model, domain, config, env=None):
             return {'error': f'Error calculating {aggregation} for {field}: {str(e)}'}
 
 
+def _humanize_field_name(field_name):
+    """Convert technical field names to human-readable labels."""
+    # Remove common prefixes/suffixes
+    field_name = field_name.replace('_id', '').replace('_ids', '')
+    
+    # Split by underscore and capitalize each word
+    words = field_name.split('_')
+    return ' '.join(word.capitalize() for word in words)
+
+
+def _format_date_value(value):
+    """Format date/datetime values for display."""
+    if isinstance(value, datetime):
+        return value.strftime('%B %Y')
+    elif isinstance(value, date):
+        return value.strftime('%B %Y')
+    elif isinstance(value, str):
+        # Try to parse ISO date strings
+        try:
+            # Try datetime format first
+            dt = datetime.strptime(value, '%Y-%m-%dT%H:%M:%S')
+            return dt.strftime('%B %Y')
+        except ValueError:
+            try:
+                # Try date format
+                dt = datetime.strptime(value, '%Y-%m-%d')
+                return dt.strftime('%B %Y')
+            except ValueError:
+                # Not a date, return as-is
+                return value
+    return value
+
+
+def _extract_ids_from_sql(sql_request, env):
+    """
+    Extract record IDs from SQL query results to enable drill-down navigation.
+    Looks for 'id' or 'ids' columns in the query results.
+    """
+    try:
+        # Check if query selects id/ids columns
+        if 'id' not in sql_request.lower():
+            return None
+        
+        # Execute query to get IDs
+        env.cr.execute(sql_request)
+        results = env.cr.dictfetchall()
+        
+        id_map = {}
+        for row in results:
+            # Find the key column (first column)
+            keys = list(row.keys())
+            if not keys:
+                continue
+                
+            key_col = keys[0]
+            key_value = row.get(key_col)
+            
+            # Look for id or ids column
+            record_ids = []
+            if 'id' in row:
+                record_ids = [row['id']] if row['id'] else []
+            elif 'ids' in row:
+                ids_value = row['ids']
+                if isinstance(ids_value, list):
+                    record_ids = ids_value
+                elif isinstance(ids_value, str):
+                    # Parse PostgreSQL array format: {1,2,3}
+                    record_ids = [int(x) for x in ids_value.strip('{}').split(',') if x]
+            
+            # Format key for matching
+            formatted_key = _format_date_value(key_value)
+            id_map[formatted_key] = record_ids
+        
+        return id_map
+    except Exception as e:
+        _logger.warning("Could not extract IDs from SQL query: %s", e)
+        return None
+
+
 def _process_sql_request(sql_request, viz_type, config, env):
-    """Process a SQL request with security measures."""
+    """Process a SQL request with enhanced formatting, labels, and domain support."""
     try:
         env.cr.execute(sql_request)
         results = env.cr.dictfetchall()
+        
+        # Try to extract IDs for drill-down support
+        id_map = _extract_ids_from_sql(sql_request, env)
 
         # Format data based on visualization type
         if viz_type == 'graph':
             if results and isinstance(results[0], dict) and 'key' not in results[0]:
                 transformed_results = []
+                measure_labels = {}  # Store humanized labels for measures
+                
                 for row in results:
                     if isinstance(row, dict) and row:
                         new_row = {}
                         keys = list(row.keys())
                         if keys:
                             first_key = keys[0]
-                            new_row['key'] = row[first_key]
+                            key_value = row[first_key]
+                            
+                            # Format date/datetime keys for better display
+                            formatted_key = _format_date_value(key_value)
+                            new_row['key'] = formatted_key
+                            
+                            # Add domain for drill-down navigation
+                            if id_map and formatted_key in id_map:
+                                record_ids = id_map[formatted_key]
+                                new_row['__domain'] = [('id', 'in', record_ids)]
+                            else:
+                                new_row['__domain'] = []
 
+                            # Copy measure columns and build labels
                             for k in keys[1:]:
-                                new_row[k] = row[k]
+                                if k not in ['id', 'ids']:  # Skip ID columns
+                                    new_row[k] = row[k]
+                                    if k not in measure_labels:
+                                        measure_labels[k] = _humanize_field_name(k)
 
                             transformed_results.append(new_row)
                         else:
                             transformed_results.append(row)
                     else:
                         transformed_results.append(row)
-                return {'data': transformed_results}
+                
+                # Auto-detect measures (all columns except 'key', '__domain', 'id', 'ids')
+                if transformed_results:
+                    first_row = transformed_results[0]
+                    auto_measures = [k for k in first_row.keys() 
+                                   if k not in ['key', '__domain', 'id', 'ids']]
+                else:
+                    auto_measures = []
+                
+                # Build metadata with measure labels
+                metadata = {
+                    'total_count': len(transformed_results),
+                    'auto_measures': auto_measures,
+                    'measure_labels': measure_labels  # Add humanized labels
+                }
+                
+                # Detect key column type for better enriched_group_by
+                key_type = 'varchar'
+                key_label = 'Key'
+                if results and results[0]:
+                    first_key = list(results[0].keys())[0]
+                    first_value = results[0][first_key]
+                    key_label = _humanize_field_name(first_key)
+                    
+                    if isinstance(first_value, (datetime, date)):
+                        key_type = 'date'
+                    elif isinstance(first_value, str):
+                        # Check if it's a date string
+                        try:
+                            datetime.strptime(first_value, '%Y-%m-%dT%H:%M:%S')
+                            key_type = 'date'
+                        except ValueError:
+                            try:
+                                datetime.strptime(first_value, '%Y-%m-%d')
+                                key_type = 'date'
+                            except ValueError:
+                                pass
+                
+                # Build enriched_group_by with detected type and label
+                enriched_group_by = [{
+                    'field': 'key',
+                    'field_name': 'key',
+                    'type': key_type,
+                    'show_empty': False,
+                    'label': key_label,
+                    'interval': None
+                }]
+                
+                return {
+                    'data': transformed_results,
+                    'metadata': metadata,
+                    'enriched_group_by': enriched_group_by
+                }
             else:
-                return {'data': results}
+                # Results already have 'key' column
+                measure_labels = {}
+                
+                for row in results:
+                    if isinstance(row, dict):
+                        # Format key if it's a date
+                        if 'key' in row:
+                            row['key'] = _format_date_value(row['key'])
+                        
+                        # Add domain if we have ID mapping
+                        if '__domain' not in row:
+                            if id_map and row.get('key') in id_map:
+                                record_ids = id_map[row['key']]
+                                row['__domain'] = [('id', 'in', record_ids)]
+                            else:
+                                row['__domain'] = []
+                        
+                        # Build measure labels
+                        for k in row.keys():
+                            if k not in ['key', '__domain', 'id', 'ids'] and k not in measure_labels:
+                                measure_labels[k] = _humanize_field_name(k)
+                
+                # Auto-detect measures
+                if results:
+                    first_row = results[0]
+                    auto_measures = [k for k in first_row.keys() 
+                                   if k not in ['key', '__domain', 'id', 'ids']]
+                else:
+                    auto_measures = []
+                
+                metadata = {
+                    'total_count': len(results),
+                    'auto_measures': auto_measures,
+                    'measure_labels': measure_labels
+                }
+                
+                enriched_group_by = [{
+                    'field': 'key',
+                    'field_name': 'key',
+                    'type': 'varchar',
+                    'show_empty': False,
+                    'label': 'Key',
+                    'interval': None
+                }]
+                
+                return {
+                    'data': results,
+                    'metadata': metadata,
+                    'enriched_group_by': enriched_group_by
+                }
         elif viz_type == 'table':
-            return {'data': results}
+            # For tables, format dates and add domains
+            measure_labels = {}
+            columns = []
+            
+            for row in results:
+                if isinstance(row, dict):
+                    # Format date values
+                    for k, v in row.items():
+                        row[k] = _format_date_value(v)
+                        
+                        # Build humanized labels
+                        if k not in ['id', 'ids', '__domain'] and k not in measure_labels:
+                            measure_labels[k] = _humanize_field_name(k)
+                    
+                    # Add domain for drill-down if we have an id column
+                    if '__domain' not in row and 'id' in row:
+                        row['__domain'] = [('id', '=', row['id'])]
+            
+            if results:
+                columns = [k for k in results[0].keys() if k not in ['__domain']]
+            
+            return {
+                'data': results,
+                'metadata': {
+                    'total_count': len(results),
+                    'columns': columns,
+                    'column_labels': measure_labels
+                }
+            }
         elif viz_type == 'block':
-            results = results[0]
-            results["label"] = config.get('block_options').get('field')
-            return {'data': results}
+            # For blocks, get the first result
+            if results and len(results) > 0:
+                result = results[0]
+                # Get the first value (usually an aggregated value)
+                keys = list(result.keys())
+                if keys:
+                    first_key = keys[0]
+                    value = result[first_key]
+                    label = _humanize_field_name(first_key)
+                    
+                    return {
+                        'data': {
+                            'value': value,
+                            'label': label,
+                            '__domain': []
+                        }
+                    }
+            
+            return {
+                'data': {
+                    'value': 0,
+                    'label': 'No Data',
+                    '__domain': []
+                }
+            }
 
     except Exception as e:
         _logger.error("SQL execution error: %s", e)
@@ -1416,12 +1659,23 @@ def process_dashboard_request(request_data, env):
             continue
 
         try:
-            # Extract configuration parameters
+            # Extract required parameters
             viz_type = config.get('type')
             model_name = config.get('model')
             data_source = config.get('data_source', {})
+            sql_request = data_source.get('sqlRequest')
 
-            # Validate essential parameters
+            # For SQL mode, we don't need a valid model
+            if sql_request:
+                if not viz_type:
+                    results[config_id] = {'error': 'Missing required parameter: type'}
+                    continue
+                # Process SQL request directly
+                result = _process_sql_request(sql_request, viz_type, config, env)
+                results[config_id] = result
+                continue
+
+            # For standard mode, validate model
             if not all([viz_type, model_name]):
                 results[config_id] = {'error': 'Missing required parameters: type, model'}
                 continue
@@ -1464,11 +1718,12 @@ def process_dashboard_request(request_data, env):
             else:
                 result = {'error': f'Unsupported visualization type: {viz_type}'}
 
-            # Add enriched groupBy to result for frontend access
-            if group_by and viz_type in ['graph', 'table']:
+            # Add enriched groupBy to result for frontend access (only if no error)
+            if group_by and viz_type in ['graph', 'table'] and 'error' not in result:
                 result['enriched_group_by'] = group_by
 
-            if data_source.get('preview') and viz_type != 'block':
+            # Apply preview limit only if data exists and no error
+            if data_source.get('preview') and viz_type != 'block' and 'data' in result and 'error' not in result:
                 result['data'] = result['data'][:50]
 
             results[config_id] = result

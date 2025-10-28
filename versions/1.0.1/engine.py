@@ -1,12 +1,3 @@
-"""
-Odashboard Engine - Version 1.0.1
-This file contains all the processing logic for dashboard visualizations.
-
-Changes in 1.0.1:
-- Reimplemented _process_sql_request with secure server-side SQL building
-- Uses parameterized queries to prevent SQL injection
-- Accepts structured query parameters instead of raw SQL
-"""
 import logging
 
 from datetime import datetime, timedelta

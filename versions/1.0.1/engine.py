@@ -1,8 +1,10 @@
 import logging
+import pytz
 
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
-import pytz
+
+from odoo.tools import SQL
 
 _logger = logging.getLogger(__name__)
 
@@ -386,11 +388,11 @@ def _process_block(model, domain, config, env=None):
             # More reliable and unified solution for all aggregations
             try:
                 # First check if there are any records
-                count_query = f"""
-                        SELECT COUNT(*) as count
-                        FROM {model._table}
-                        WHERE {where_clause}
-                    """
+                count_query = SQL(
+                    "SELECT COUNT(*) as count FROM %s WHERE %s",
+                    SQL.identifier(model._table),
+                    SQL(where_clause)
+                )
                 model.env.cr.execute(count_query, where_params)
                 count_result = model.env.cr.fetchone()
                 count = 0
@@ -407,11 +409,12 @@ def _process_block(model, domain, config, env=None):
                     # Calculate aggregation based on type
                     if agg_func == 'AVG':
                         # Calculate sum for average
-                        sum_query = f"""
-                                SELECT SUM({field}) as total
-                                FROM {model._table}
-                                WHERE {where_clause}
-                            """
+                        sum_query = SQL(
+                            "SELECT SUM(%s) as total FROM %s WHERE %s",
+                            SQL.identifier(field),
+                            SQL.identifier(model._table),
+                            SQL(where_clause)
+                        )
                         model.env.cr.execute(sum_query, where_params)
                         sum_result = model.env.cr.fetchone()
                         total = 0
@@ -424,13 +427,14 @@ def _process_block(model, domain, config, env=None):
                         _logger.info("Calculated AVG manually: total=%s, count=%s, avg=%s", total, count, value)
                     elif agg_func == 'MAX':
                         # Calculate maximum
-                        max_query = f"""
-                                SELECT {field} as max_value
-                                FROM {model._table}
-                                WHERE {where_clause} AND {field} IS NOT NULL
-                                ORDER BY {field} DESC
-                                LIMIT 1
-                            """
+                        max_query = SQL(
+                            "SELECT %s as max_value FROM %s WHERE %s AND %s IS NOT NULL ORDER BY %s DESC LIMIT 1",
+                            SQL.identifier(field),
+                            SQL.identifier(model._table),
+                            SQL(where_clause),
+                            SQL.identifier(field),
+                            SQL.identifier(field)
+                        )
                         model.env.cr.execute(max_query, where_params)
                         max_result = model.env.cr.fetchone()
                         value = 0
@@ -441,13 +445,14 @@ def _process_block(model, domain, config, env=None):
                         _logger.info("Calculated MAX manually: %s", value)
                     elif agg_func == 'MIN':
                         # Calculate minimum
-                        min_query = f"""
-                                SELECT {field} as min_value
-                                FROM {model._table}
-                                WHERE {where_clause} AND {field} IS NOT NULL
-                                ORDER BY {field} ASC
-                                LIMIT 1
-                            """
+                        min_query = SQL(
+                            "SELECT %s as min_value FROM %s WHERE %s AND %s IS NOT NULL ORDER BY %s ASC LIMIT 1",
+                            SQL.identifier(field),
+                            SQL.identifier(model._table),
+                            SQL(where_clause),
+                            SQL.identifier(field),
+                            SQL.identifier(field)
+                        )
                         model.env.cr.execute(min_query, where_params)
                         min_result = model.env.cr.fetchone()
                         value = 0
@@ -458,11 +463,12 @@ def _process_block(model, domain, config, env=None):
                         _logger.info("Calculated MIN manually: %s", value)
                     elif agg_func == 'SUM':
                         # Calculate sum
-                        sum_query = f"""
-                                SELECT SUM({field}) as total
-                                FROM {model._table}
-                                WHERE {where_clause}
-                            """
+                        sum_query = SQL(
+                            "SELECT SUM(%s) as total FROM %s WHERE %s",
+                            SQL.identifier(field),
+                            SQL.identifier(model._table),
+                            SQL(where_clause)
+                        )
                         model.env.cr.execute(sum_query, where_params)
                         sum_result = model.env.cr.fetchone()
                         value = 0
@@ -757,22 +763,40 @@ def _build_relational_query(metadata, record_ids_tuple):
     
     if metadata['field_type'] == 'one2many':
         table = metadata['table_name']
-        where_clause = f"{metadata['foreign_key']} IN %s"
+        foreign_key = metadata['foreign_key']
         
         # Build SELECT clause based on aggregation type
         if aggregation == 'count':
-            select_clause = "COUNT(*)"
+            query = SQL(
+                "SELECT COUNT(*) FROM %s WHERE %s IN %%s",
+                SQL.identifier(table),
+                SQL.identifier(foreign_key)
+            )
         elif aggregation == 'count_distinct':
-            select_clause = "COUNT(DISTINCT id)"
+            query = SQL(
+                "SELECT COUNT(DISTINCT id) FROM %s WHERE %s IN %%s",
+                SQL.identifier(table),
+                SQL.identifier(foreign_key)
+            )
         elif aggregation in ['sum', 'avg', 'min', 'max'] and related_field:
             # Advanced aggregations on related field
             agg_func = aggregation.upper()
-            select_clause = f"{agg_func}({related_field})"
+            query = SQL(
+                "SELECT %s(%s) FROM %s WHERE %s IN %%s",
+                SQL(agg_func),
+                SQL.identifier(related_field),
+                SQL.identifier(table),
+                SQL.identifier(foreign_key)
+            )
         else:
             # Fallback to count
-            select_clause = "COUNT(*)"
+            query = SQL(
+                "SELECT COUNT(*) FROM %s WHERE %s IN %%s",
+                SQL.identifier(table),
+                SQL.identifier(foreign_key)
+            )
             
-        return f"SELECT {select_clause} FROM {table} WHERE {where_clause}"
+        return query
             
     else:  # many2many
         relation_table = metadata['relation_table']
@@ -782,29 +806,42 @@ def _build_relational_query(metadata, record_ids_tuple):
         
         if aggregation == 'count':
             # Simple count on relation table
-            select_clause = "COUNT(*)"
-            return f"SELECT {select_clause} FROM {relation_table} WHERE {column1} IN %s"
+            query = SQL(
+                "SELECT COUNT(*) FROM %s WHERE %s IN %%s",
+                SQL.identifier(relation_table),
+                SQL.identifier(column1)
+            )
             
         elif aggregation == 'count_distinct':
             # Count distinct related records
-            select_clause = f"COUNT(DISTINCT {column2})"
-            return f"SELECT {select_clause} FROM {relation_table} WHERE {column1} IN %s"
+            query = SQL(
+                "SELECT COUNT(DISTINCT %s) FROM %s WHERE %s IN %%s",
+                SQL.identifier(column2),
+                SQL.identifier(relation_table),
+                SQL.identifier(column1)
+            )
             
         elif aggregation in ['sum', 'avg', 'min', 'max'] and related_field:
             # Advanced aggregations require JOIN with related table
             agg_func = aggregation.upper()
-            select_clause = f"{agg_func}(rt.{related_field})"
-            
-            return f"""
-                SELECT {select_clause} 
-                FROM {relation_table} rel 
-                JOIN {related_table} rt ON rel.{column2} = rt.id 
-                WHERE rel.{column1} IN %s
-            """
+            query = SQL(
+                "SELECT %s(rt.%s) FROM %s rel JOIN %s rt ON rel.%s = rt.id WHERE rel.%s IN %%s",
+                SQL(agg_func),
+                SQL.identifier(related_field),
+                SQL.identifier(relation_table),
+                SQL.identifier(related_table),
+                SQL.identifier(column2),
+                SQL.identifier(column1)
+            )
         else:
             # Fallback to count
-            select_clause = "COUNT(*)"
-            return f"SELECT {select_clause} FROM {relation_table} WHERE {column1} IN %s"
+            query = SQL(
+                "SELECT COUNT(*) FROM %s WHERE %s IN %%s",
+                SQL.identifier(relation_table),
+                SQL.identifier(column1)
+            )
+        
+        return query
 
 
 def _execute_relational_query(query, record_ids_tuple, model, field_name, metadata=None):
@@ -823,7 +860,7 @@ def _execute_relational_query(query, record_ids_tuple, model, field_name, metada
             # Simple count fallback for backward compatibility
             group_records = model.browse(list(record_ids_tuple))
             field_data = group_records.read([field_name])
-            return sum(len(data.get(field_name, [])) for data in field_data)
+            return sum([len(data.get(field_name, [])) for data in field_data])
 
 
 def _execute_orm_fallback(record_ids_tuple, model, field_name, metadata):
@@ -842,7 +879,7 @@ def _execute_orm_fallback(record_ids_tuple, model, field_name, metadata):
         if aggregation == 'count':
             # Simple count of related records
             field_data = group_records.read([field_name])
-            return sum(len(data.get(field_name, [])) for data in field_data)
+            return sum([len(data.get(field_name, [])) for data in field_data])
             
         elif aggregation == 'count_distinct':
             # Count distinct related records
@@ -877,7 +914,7 @@ def _execute_orm_fallback(record_ids_tuple, model, field_name, metadata):
         
         # Fallback to count if aggregation not recognized
         field_data = group_records.read([field_name])
-        return sum(len(data.get(field_name, [])) for data in field_data)
+        return sum([len(data.get(field_name, [])) for data in field_data])
         
     except Exception as e:
         _logger.error(f"ORM fallback failed for {field_name}: {e}")

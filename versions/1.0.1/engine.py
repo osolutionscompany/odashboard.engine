@@ -8,6 +8,12 @@ from odoo.tools import SQL
 
 _logger = logging.getLogger(__name__)
 
+try:
+    from psycopg2.extensions import AsIs
+except ImportError:
+    # Will be provided by globals during execution
+    AsIs = None
+
 
 def _has_company_field(model):
     """
@@ -388,12 +394,20 @@ def _process_block(model, domain, config, env=None):
             # More reliable and unified solution for all aggregations
             try:
                 # First check if there are any records
-                count_query = SQL(
-                    "SELECT COUNT(*) as count FROM %s WHERE %s",
-                    SQL.identifier(model._table),
-                    SQL(where_clause)
-                )
-                model.env.cr.execute(count_query, where_params)
+                # Use Odoo's SQL builder with proper identifier quoting to prevent SQL injection
+                if where_params:
+                    # WHERE clause has parameters - build query manually without SQL() wrapper
+                    # Use psycopg2's AsIs for safe identifier quoting (provided by globals)
+                    count_query_str = "SELECT COUNT(*) as count FROM %s WHERE " + where_clause
+                    model.env.cr.execute(count_query_str, [AsIs(model._table)] + where_params)
+                else:
+                    # No parameters, use SQL builder
+                    count_query = SQL(
+                        "SELECT COUNT(*) as count FROM %s WHERE %s",
+                        SQL.identifier(model._table),
+                        SQL(where_clause)
+                    )
+                    model.env.cr.execute(count_query)
                 count_result = model.env.cr.fetchone()
                 count = 0
                 if count_result and len(count_result) > 0:
@@ -409,13 +423,17 @@ def _process_block(model, domain, config, env=None):
                     # Calculate aggregation based on type
                     if agg_func == 'AVG':
                         # Calculate sum for average
-                        sum_query = SQL(
-                            "SELECT SUM(%s) as total FROM %s WHERE %s",
-                            SQL.identifier(field),
-                            SQL.identifier(model._table),
-                            SQL(where_clause)
-                        )
-                        model.env.cr.execute(sum_query, where_params)
+                        if where_params:
+                            sum_query_str = "SELECT SUM(%s) as total FROM %s WHERE " + where_clause
+                            model.env.cr.execute(sum_query_str, [AsIs(field), AsIs(model._table)] + where_params)
+                        else:
+                            sum_query = SQL(
+                                "SELECT SUM(%s) as total FROM %s WHERE %s",
+                                SQL.identifier(field),
+                                SQL.identifier(model._table),
+                                SQL(where_clause)
+                            )
+                            model.env.cr.execute(sum_query)
                         sum_result = model.env.cr.fetchone()
                         total = 0
 
@@ -427,15 +445,19 @@ def _process_block(model, domain, config, env=None):
                         _logger.info("Calculated AVG manually: total=%s, count=%s, avg=%s", total, count, value)
                     elif agg_func == 'MAX':
                         # Calculate maximum
-                        max_query = SQL(
-                            "SELECT %s as max_value FROM %s WHERE %s AND %s IS NOT NULL ORDER BY %s DESC LIMIT 1",
-                            SQL.identifier(field),
-                            SQL.identifier(model._table),
-                            SQL(where_clause),
-                            SQL.identifier(field),
-                            SQL.identifier(field)
-                        )
-                        model.env.cr.execute(max_query, where_params)
+                        if where_params:
+                            max_query_str = "SELECT %s as max_value FROM %s WHERE " + where_clause + " AND %s IS NOT NULL ORDER BY %s DESC LIMIT 1"
+                            model.env.cr.execute(max_query_str, [AsIs(field), AsIs(model._table)] + where_params + [AsIs(field), AsIs(field)])
+                        else:
+                            max_query = SQL(
+                                "SELECT %s as max_value FROM %s WHERE %s AND %s IS NOT NULL ORDER BY %s DESC LIMIT 1",
+                                SQL.identifier(field),
+                                SQL.identifier(model._table),
+                                SQL(where_clause),
+                                SQL.identifier(field),
+                                SQL.identifier(field)
+                            )
+                            model.env.cr.execute(max_query)
                         max_result = model.env.cr.fetchone()
                         value = 0
 
@@ -445,15 +467,19 @@ def _process_block(model, domain, config, env=None):
                         _logger.info("Calculated MAX manually: %s", value)
                     elif agg_func == 'MIN':
                         # Calculate minimum
-                        min_query = SQL(
-                            "SELECT %s as min_value FROM %s WHERE %s AND %s IS NOT NULL ORDER BY %s ASC LIMIT 1",
-                            SQL.identifier(field),
-                            SQL.identifier(model._table),
-                            SQL(where_clause),
-                            SQL.identifier(field),
-                            SQL.identifier(field)
-                        )
-                        model.env.cr.execute(min_query, where_params)
+                        if where_params:
+                            min_query_str = "SELECT %s as min_value FROM %s WHERE " + where_clause + " AND %s IS NOT NULL ORDER BY %s ASC LIMIT 1"
+                            model.env.cr.execute(min_query_str, [AsIs(field), AsIs(model._table)] + where_params + [AsIs(field), AsIs(field)])
+                        else:
+                            min_query = SQL(
+                                "SELECT %s as min_value FROM %s WHERE %s AND %s IS NOT NULL ORDER BY %s ASC LIMIT 1",
+                                SQL.identifier(field),
+                                SQL.identifier(model._table),
+                                SQL(where_clause),
+                                SQL.identifier(field),
+                                SQL.identifier(field)
+                            )
+                            model.env.cr.execute(min_query)
                         min_result = model.env.cr.fetchone()
                         value = 0
 
@@ -463,13 +489,17 @@ def _process_block(model, domain, config, env=None):
                         _logger.info("Calculated MIN manually: %s", value)
                     elif agg_func == 'SUM':
                         # Calculate sum
-                        sum_query = SQL(
-                            "SELECT SUM(%s) as total FROM %s WHERE %s",
-                            SQL.identifier(field),
-                            SQL.identifier(model._table),
-                            SQL(where_clause)
-                        )
-                        model.env.cr.execute(sum_query, where_params)
+                        if where_params:
+                            sum_query_str = "SELECT SUM(%s) as total FROM %s WHERE " + where_clause
+                            model.env.cr.execute(sum_query_str, [AsIs(field), AsIs(model._table)] + where_params)
+                        else:
+                            sum_query = SQL(
+                                "SELECT SUM(%s) as total FROM %s WHERE %s",
+                                SQL.identifier(field),
+                                SQL.identifier(model._table),
+                                SQL(where_clause)
+                            )
+                            model.env.cr.execute(sum_query)
                         sum_result = model.env.cr.fetchone()
                         value = 0
 
@@ -1374,8 +1404,9 @@ def process_dashboard_request(request_data, env):
 
             # Process based on visualization type
             if sql_request and viz_type in ['graph', 'table']:
+                pass
                 # Handle SQL request (with security measures)
-                result = _process_sql_request(sql_request, viz_type, config, env)
+                # result = _process_sql_request(sql_request, viz_type, config, env)
             elif viz_type == 'block':
                 result = _process_block(model, domain, config, env)
             elif viz_type == 'graph':

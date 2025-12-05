@@ -1,16 +1,3 @@
-"""
-Odashboard Engine - Version 1.0.0
-This file contains all the processing logic for dashboard visualizations.
-"""
-import logging
-
-from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
-import pytz
-
-_logger = logging.getLogger(__name__)
-
-
 def _has_company_field(model):
     """
     Check if a model has company_id or company_ids field
@@ -263,74 +250,6 @@ def get_model_fields(model_name, env):
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
-
-def get_model_records(model_name, kw, env):
-    """
-    Retrieve all records of a specific model with pagination and search functionality.
-
-    :param model_name: Name of the Odoo model (example: 'res.partner')
-    :param page: Page number for pagination (default: 1)
-    :param search: Optional search string to filter records by name (default: '')
-    :return: JSON with the model records
-    """
-    try:
-        _logger.info("API call: Fetching records for model: %s", model_name)
-
-        # Check if the model exists
-        if model_name not in env:
-            return {'success': False, 'error': f"Model '{model_name}' not found"}
-
-        # Get pagination parameters
-        page = int(kw.get('page', 1))
-        limit = 50  # Number of records per page
-        offset = (page - 1) * limit
-
-        # Get search parameter
-        search_query = kw.get('search', '')
-
-        # Create domain for search
-        domain = []
-        if search_query:
-            domain.append(('name', 'ilike', search_query))
-
-        # Get model
-        model = env[model_name].sudo()
-
-        # Apply company filtering
-        domain = _apply_company_filtering(domain, model, env)
-
-        # Count total records matching the domain
-        total_records = model.search_count(domain)
-        total_pages = (total_records + limit - 1) // limit
-
-        # Search with pagination
-        records = model.search(domain, order="name asc", limit=limit, offset=offset)
-
-        # Format the records
-        record_list = []
-        for record in records:
-            record_data = {
-                'id': record.id,
-                'name': record.name,
-            }
-
-            # Include display_name if different from name
-            if record.display_name != record.name:
-                record_data['display_name'] = record.display_name
-
-            # Get other basic fields if they exist
-            for field in ['active', 'code', 'ref']:
-                if hasattr(record, field):
-                    record_data[field] = getattr(record, field)
-
-            record_list.append(record_data)
-
-        return {'success': True, 'data': record_list}
-
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
-
-
 def get_model_search(model_name, kw, request):
     search = kw.get('search', '')
     page = int(kw.get('page', 1))
@@ -441,29 +360,28 @@ def _process_block(model, domain, config, env=None):
 
             # Build the WHERE clause and parameters securely
             if not domain:
-                where_clause = "TRUE"
+                where_clause = SQL("TRUE")
                 where_params = []
             else:
                 # Instead of using _where_calc directly, use search to get the query
                 # This is a safer and more robust way to generate the WHERE clause
                 records = model.search(domain)
                 if not records:
-                    where_clause = "FALSE"  # No matching records
-                    where_params = []
+                    where_clause = SQL("FALSE")
                 else:
                     id_list = records.ids
-                    where_clause = f"{model._table}.id IN %s"
-                    where_params = [tuple(id_list) if len(id_list) > 1 else (id_list[0],)]
+                    where_clause = SQL("%s.id IN %s", SQL.identifier(model._table),
+                    tuple(id_list) if len(id_list) > 1 else (id_list[0],))
 
             # More reliable and unified solution for all aggregations
             try:
-                # First check if there are any records
-                count_query = f"""
-                        SELECT COUNT(*) as count
-                        FROM {model._table}
-                        WHERE {where_clause}
-                    """
-                model.env.cr.execute(count_query, where_params)
+                # No parameters, use SQL builder
+                count_query = SQL(
+                    "SELECT COUNT(*) as count FROM %s WHERE %s",
+                    SQL.identifier(model._table),
+                    SQL(where_clause)
+                )
+                model.env.cr.execute(count_query)
                 count_result = model.env.cr.fetchone()
                 count = 0
                 if count_result and len(count_result) > 0:
@@ -479,12 +397,13 @@ def _process_block(model, domain, config, env=None):
                     # Calculate aggregation based on type
                     if agg_func == 'AVG':
                         # Calculate sum for average
-                        sum_query = f"""
-                                SELECT SUM({field}) as total
-                                FROM {model._table}
-                                WHERE {where_clause}
-                            """
-                        model.env.cr.execute(sum_query, where_params)
+                        sum_query = SQL(
+                            "SELECT SUM(%s) as total FROM %s WHERE %s",
+                            SQL.identifier(field),
+                            SQL.identifier(model._table),
+                            SQL(where_clause)
+                        )
+                        model.env.cr.execute(sum_query)
                         sum_result = model.env.cr.fetchone()
                         total = 0
 
@@ -496,14 +415,15 @@ def _process_block(model, domain, config, env=None):
                         _logger.info("Calculated AVG manually: total=%s, count=%s, avg=%s", total, count, value)
                     elif agg_func == 'MAX':
                         # Calculate maximum
-                        max_query = f"""
-                                SELECT {field} as max_value
-                                FROM {model._table}
-                                WHERE {where_clause} AND {field} IS NOT NULL
-                                ORDER BY {field} DESC
-                                LIMIT 1
-                            """
-                        model.env.cr.execute(max_query, where_params)
+                        max_query = SQL(
+                            "SELECT %s as max_value FROM %s WHERE %s AND %s IS NOT NULL ORDER BY %s DESC LIMIT 1",
+                            SQL.identifier(field),
+                            SQL.identifier(model._table),
+                            SQL(where_clause),
+                            SQL.identifier(field),
+                            SQL.identifier(field)
+                        )
+                        model.env.cr.execute(max_query)
                         max_result = model.env.cr.fetchone()
                         value = 0
 
@@ -513,14 +433,15 @@ def _process_block(model, domain, config, env=None):
                         _logger.info("Calculated MAX manually: %s", value)
                     elif agg_func == 'MIN':
                         # Calculate minimum
-                        min_query = f"""
-                                SELECT {field} as min_value
-                                FROM {model._table}
-                                WHERE {where_clause} AND {field} IS NOT NULL
-                                ORDER BY {field} ASC
-                                LIMIT 1
-                            """
-                        model.env.cr.execute(min_query, where_params)
+                        min_query = SQL(
+                            "SELECT %s as min_value FROM %s WHERE %s AND %s IS NOT NULL ORDER BY %s ASC LIMIT 1",
+                            SQL.identifier(field),
+                            SQL.identifier(model._table),
+                            SQL(where_clause),
+                            SQL.identifier(field),
+                            SQL.identifier(field)
+                        )
+                        model.env.cr.execute(min_query)
                         min_result = model.env.cr.fetchone()
                         value = 0
 
@@ -530,12 +451,13 @@ def _process_block(model, domain, config, env=None):
                         _logger.info("Calculated MIN manually: %s", value)
                     elif agg_func == 'SUM':
                         # Calculate sum
-                        sum_query = f"""
-                                SELECT SUM({field}) as total
-                                FROM {model._table}
-                                WHERE {where_clause}
-                            """
-                        model.env.cr.execute(sum_query, where_params)
+                        sum_query = SQL(
+                            "SELECT SUM(%s) as total FROM %s WHERE %s",
+                            SQL.identifier(field),
+                            SQL.identifier(model._table),
+                            SQL(where_clause)
+                        )
+                        model.env.cr.execute(sum_query)
                         sum_result = model.env.cr.fetchone()
                         value = 0
 
@@ -560,192 +482,6 @@ def _process_block(model, domain, config, env=None):
         except Exception as e:
             _logger.error("Error calculating block value: %s", e)
             return {'error': f'Error calculating {aggregation} for {field}: {str(e)}'}
-
-
-def _process_sql_request(sql_request, viz_type, config, env):
-    """
-    Process a SQL request with security measures using odoo.tools.SQL.
-    
-    SECURITY: This function does NOT accept raw SQL from the client.
-    Instead, it accepts structured parameters and builds SQL server-side.
-    
-    Expected sql_request structure:
-    {
-        "type": "custom_query",  # Type of query
-        "model": "res.partner",  # Base model (for table name)
-        "select": [              # Fields to select
-            {"field": "name", "aggregation": "count"},
-            {"field": "country_id", "as": "country"}
-        ],
-        "where": [               # WHERE conditions (safe parameters)
-            {"field": "active", "operator": "=", "value": True},
-            {"field": "customer_rank", "operator": ">", "value": 0}
-        ],
-        "group_by": ["country_id"],  # GROUP BY fields
-        "order_by": [{"field": "name", "direction": "ASC"}],  # ORDER BY
-        "limit": 100
-    }
-    
-    Args:
-        sql_request: Structured query parameters (NOT raw SQL)
-        viz_type: Type of visualization (graph, table)
-        config: Visualization configuration
-        env: Odoo environment
-        
-    Returns:
-        dict: Query results or error
-    """
-    try:
-        from odoo.tools import SQL
-        
-        # Validate that sql_request is a dict with structured parameters
-        if not isinstance(sql_request, dict):
-            return {'error': 'SQL request must be a structured dictionary, not raw SQL'}
-        
-        # Check if this is a raw SQL string (security check)
-        if isinstance(sql_request, str) or 'SELECT' in str(sql_request).upper():
-            _logger.error("SECURITY: Attempted to pass raw SQL. Only structured queries are allowed.")
-            return {'error': 'Raw SQL is not allowed. Use structured query parameters.'}
-        
-        # Extract query parameters
-        query_type = sql_request.get('type', 'custom_query')
-        model_name = sql_request.get('model')
-        select_fields = sql_request.get('select', [])
-        where_conditions = sql_request.get('where', [])
-        group_by_fields = sql_request.get('group_by', [])
-        order_by_fields = sql_request.get('order_by', [])
-        limit = sql_request.get('limit', 1000)
-        
-        # Validate required parameters
-        if not model_name:
-            return {'error': 'Model name is required for SQL queries'}
-        
-        # Get the model and validate access
-        try:
-            model = env[model_name].sudo()
-        except KeyError:
-            return {'error': f'Model not found: {model_name}'}
-        
-        # Get table name from model
-        table_name = model._table
-        
-        # Build SELECT clause
-        select_parts = []
-        for field_spec in select_fields:
-            if isinstance(field_spec, str):
-                # Simple field name
-                field_name = field_spec
-                select_parts.append(field_name)
-            elif isinstance(field_spec, dict):
-                field_name = field_spec.get('field')
-                aggregation = field_spec.get('aggregation')
-                alias = field_spec.get('as', field_name)
-                
-                if aggregation:
-                    # Aggregation function
-                    agg_upper = aggregation.upper()
-                    if agg_upper in ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX']:
-                        select_parts.append(f"{agg_upper}({field_name}) as {alias}")
-                    else:
-                        return {'error': f'Unsupported aggregation: {aggregation}'}
-                else:
-                    select_parts.append(f"{field_name} as {alias}" if alias != field_name else field_name)
-        
-        if not select_parts:
-            select_parts = ['*']
-        
-        select_clause = ', '.join(select_parts)
-        
-        # Build WHERE clause using parameterized queries
-        where_parts = []
-        where_params = []
-        for condition in where_conditions:
-            field = condition.get('field')
-            operator = condition.get('operator', '=')
-            value = condition.get('value')
-            
-            # Validate operator to prevent SQL injection
-            allowed_operators = ['=', '!=', '>', '<', '>=', '<=', 'LIKE', 'ILIKE', 'IN', 'NOT IN', 'IS NULL', 'IS NOT NULL']
-            if operator.upper() not in allowed_operators:
-                return {'error': f'Unsupported operator: {operator}'}
-            
-            if operator.upper() in ['IS NULL', 'IS NOT NULL']:
-                where_parts.append(f"{field} {operator.upper()}")
-            elif operator.upper() in ['IN', 'NOT IN']:
-                if not isinstance(value, (list, tuple)):
-                    return {'error': f'Operator {operator} requires a list value'}
-                placeholders = ','.join(['%s'] * len(value))
-                where_parts.append(f"{field} {operator.upper()} ({placeholders})")
-                where_params.extend(value)
-            else:
-                where_parts.append(f"{field} {operator} %s")
-                where_params.append(value)
-        
-        where_clause = ' AND '.join(where_parts) if where_parts else '1=1'
-        
-        # Build GROUP BY clause
-        group_by_clause = ''
-        if group_by_fields:
-            group_by_clause = 'GROUP BY ' + ', '.join(group_by_fields)
-        
-        # Build ORDER BY clause
-        order_by_clause = ''
-        if order_by_fields:
-            order_parts = []
-            for order_spec in order_by_fields:
-                if isinstance(order_spec, str):
-                    order_parts.append(order_spec)
-                elif isinstance(order_spec, dict):
-                    field = order_spec.get('field')
-                    direction = order_spec.get('direction', 'ASC').upper()
-                    if direction not in ['ASC', 'DESC']:
-                        direction = 'ASC'
-                    order_parts.append(f"{field} {direction}")
-            order_by_clause = 'ORDER BY ' + ', '.join(order_parts)
-        
-        # Build LIMIT clause
-        limit_clause = f'LIMIT {int(limit)}' if limit else ''
-        
-        # Construct the final SQL query using SQL wrapper
-        query_parts = [
-            f"SELECT {select_clause}",
-            f"FROM {table_name}",
-            f"WHERE {where_clause}",
-            group_by_clause,
-            order_by_clause,
-            limit_clause
-        ]
-        
-        # Remove empty parts
-        query_sql = ' '.join([part for part in query_parts if part])
-        
-        _logger.info(f"Executing secure SQL query: {query_sql}")
-        _logger.debug(f"Query parameters: {where_params}")
-        
-        # Execute the query with parameters
-        env.cr.execute(query_sql, where_params)
-        results = env.cr.dictfetchall()
-        
-        # Format results based on visualization type
-        if viz_type == 'table':
-            return {
-                'data': results,
-                'metadata': {
-                    'total_count': len(results),
-                    'limit': limit
-                }
-            }
-        elif viz_type == 'graph':
-            return {
-                'data': results
-            }
-        else:
-            return {'data': results}
-            
-    except Exception as e:
-        _logger.exception("Error in _process_sql_request: %s", e)
-        return {'error': f'Error processing SQL request: {str(e)}'}
-
 
 def _process_table(model, domain, group_by_list, order_string, config, env=None):
     """Process table type visualization."""
@@ -1015,22 +751,40 @@ def _build_relational_query(metadata, record_ids_tuple):
     
     if metadata['field_type'] == 'one2many':
         table = metadata['table_name']
-        where_clause = f"{metadata['foreign_key']} IN %s"
+        foreign_key = metadata['foreign_key']
         
         # Build SELECT clause based on aggregation type
         if aggregation == 'count':
-            select_clause = "COUNT(*)"
+            query = SQL(
+                "SELECT COUNT(*) FROM %s WHERE %s IN %%s",
+                SQL.identifier(table),
+                SQL.identifier(foreign_key)
+            )
         elif aggregation == 'count_distinct':
-            select_clause = "COUNT(DISTINCT id)"
+            query = SQL(
+                "SELECT COUNT(DISTINCT id) FROM %s WHERE %s IN %%s",
+                SQL.identifier(table),
+                SQL.identifier(foreign_key)
+            )
         elif aggregation in ['sum', 'avg', 'min', 'max'] and related_field:
             # Advanced aggregations on related field
             agg_func = aggregation.upper()
-            select_clause = f"{agg_func}({related_field})"
+            query = SQL(
+                "SELECT %s(%s) FROM %s WHERE %s IN %%s",
+                SQL(agg_func),
+                SQL.identifier(related_field),
+                SQL.identifier(table),
+                SQL.identifier(foreign_key)
+            )
         else:
             # Fallback to count
-            select_clause = "COUNT(*)"
+            query = SQL(
+                "SELECT COUNT(*) FROM %s WHERE %s IN %%s",
+                SQL.identifier(table),
+                SQL.identifier(foreign_key)
+            )
             
-        return f"SELECT {select_clause} FROM {table} WHERE {where_clause}"
+        return query
             
     else:  # many2many
         relation_table = metadata['relation_table']
@@ -1040,29 +794,42 @@ def _build_relational_query(metadata, record_ids_tuple):
         
         if aggregation == 'count':
             # Simple count on relation table
-            select_clause = "COUNT(*)"
-            return f"SELECT {select_clause} FROM {relation_table} WHERE {column1} IN %s"
+            query = SQL(
+                "SELECT COUNT(*) FROM %s WHERE %s IN %%s",
+                SQL.identifier(relation_table),
+                SQL.identifier(column1)
+            )
             
         elif aggregation == 'count_distinct':
             # Count distinct related records
-            select_clause = f"COUNT(DISTINCT {column2})"
-            return f"SELECT {select_clause} FROM {relation_table} WHERE {column1} IN %s"
+            query = SQL(
+                "SELECT COUNT(DISTINCT %s) FROM %s WHERE %s IN %%s",
+                SQL.identifier(column2),
+                SQL.identifier(relation_table),
+                SQL.identifier(column1)
+            )
             
         elif aggregation in ['sum', 'avg', 'min', 'max'] and related_field:
             # Advanced aggregations require JOIN with related table
             agg_func = aggregation.upper()
-            select_clause = f"{agg_func}(rt.{related_field})"
-            
-            return f"""
-                SELECT {select_clause} 
-                FROM {relation_table} rel 
-                JOIN {related_table} rt ON rel.{column2} = rt.id 
-                WHERE rel.{column1} IN %s
-            """
+            query = SQL(
+                "SELECT %s(rt.%s) FROM %s rel JOIN %s rt ON rel.%s = rt.id WHERE rel.%s IN %%s",
+                SQL(agg_func),
+                SQL.identifier(related_field),
+                SQL.identifier(relation_table),
+                SQL.identifier(related_table),
+                SQL.identifier(column2),
+                SQL.identifier(column1)
+            )
         else:
             # Fallback to count
-            select_clause = "COUNT(*)"
-            return f"SELECT {select_clause} FROM {relation_table} WHERE {column1} IN %s"
+            query = SQL(
+                "SELECT COUNT(*) FROM %s WHERE %s IN %%s",
+                SQL.identifier(relation_table),
+                SQL.identifier(column1)
+            )
+        
+        return query
 
 
 def _execute_relational_query(query, record_ids_tuple, model, field_name, metadata=None):
@@ -1081,7 +848,7 @@ def _execute_relational_query(query, record_ids_tuple, model, field_name, metada
             # Simple count fallback for backward compatibility
             group_records = model.browse(list(record_ids_tuple))
             field_data = group_records.read([field_name])
-            return sum(len(data.get(field_name, [])) for data in field_data)
+            return sum([len(data.get(field_name, [])) for data in field_data])
 
 
 def _execute_orm_fallback(record_ids_tuple, model, field_name, metadata):
@@ -1100,7 +867,7 @@ def _execute_orm_fallback(record_ids_tuple, model, field_name, metadata):
         if aggregation == 'count':
             # Simple count of related records
             field_data = group_records.read([field_name])
-            return sum(len(data.get(field_name, [])) for data in field_data)
+            return sum([len(data.get(field_name, [])) for data in field_data])
             
         elif aggregation == 'count_distinct':
             # Count distinct related records
@@ -1135,7 +902,7 @@ def _execute_orm_fallback(record_ids_tuple, model, field_name, metadata):
         
         # Fallback to count if aggregation not recognized
         field_data = group_records.read([field_name])
-        return sum(len(data.get(field_name, [])) for data in field_data)
+        return sum([len(data.get(field_name, [])) for data in field_data])
         
     except Exception as e:
         _logger.error(f"ORM fallback failed for {field_name}: {e}")
@@ -1595,8 +1362,9 @@ def process_dashboard_request(request_data, env):
 
             # Process based on visualization type
             if sql_request and viz_type in ['graph', 'table']:
+                pass
                 # Handle SQL request (with security measures)
-                result = _process_sql_request(sql_request, viz_type, config, env)
+                # result = _process_sql_request(sql_request, viz_type, config, env)
             elif viz_type == 'block':
                 result = _process_block(model, domain, config, env)
             elif viz_type == 'graph':

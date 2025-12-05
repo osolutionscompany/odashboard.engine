@@ -1,10 +1,17 @@
 {
-    "latest": "1.0.0",
-    "versions": {
-      "1.0.0": {
-        "date": "2025-05-16",
-        "description": "Initial version of the Odashboard engine",
-        "path": "versions/1.0.0/engine.py"
-      }
+  "latest": "1.0.1",
+  "versions": {
+    "1.0.0": {
+      "date": "2025-05-16",
+      "description": "Initial version of the Odashboard engine",
+      "path": "versions/1.0.0/engine.py",
+      "sha256": "409708e29630c9d2578714a1850bd083f18ab35395aefd242bfa44fe0d62ba53"
+    },
+    "1.0.1": {
+      "date": "2025-12-05",
+      "description": "Your description here",
+      "path": "versions/1.0.1/engine.py",
+      "sha256": "be5ebc809833b571e5e6491bc9591ccc69a7ed6af59cc686300d6cea8182b171"
     }
+  }
 }

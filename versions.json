@@ -1,10 +1,17 @@
 {
-    "latest": "1.0.0",
+    "latest": "1.0.1",
     "versions": {
       "1.0.0": {
         "date": "2025-05-16",
         "description": "Initial version of the Odashboard engine",
-        "path": "versions/1.0.0/engine.py"
+        "path": "versions/1.0.0/engine.py",
+        "sha256": "409708e29630c9d2578714a1850bd083f18ab35395aefd242bfa44fe0d62ba53"
+      },
+      "1.0.1": {
+        "date": "2025-11-05",
+        "description": "Security improvements: Field validation, checksum verification, HTTPS enforcement",
+        "path": "versions/1.0.1/engine.py",
+        "sha256": "f328fc54619cff6c06dcd89d7b4133403cab5d6daa509f04261ebdac4e9ef0e7"
       }
     }
 }
